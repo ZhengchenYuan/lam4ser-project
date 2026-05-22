@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+
+# macOS
+.DS_Store
+
+# Data and generated files (large, not code)
+data/
+embeddings/
+*.pt
+loss_curve.png
+
+# SLURM logs
+*.out

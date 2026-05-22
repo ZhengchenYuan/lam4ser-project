@@ -8,6 +8,7 @@ import audiofile
 print("Loading EMODB...")
 db = audb.load(
     'emodb',
+    version='2.0.0',
     sampling_rate=16000,
     mixdown=True,
     format='wav',
@@ -80,7 +81,7 @@ class EmoDBDataset(Dataset):
             # embedding: [1, T_audio, 768]
             embedding = outputs.last_hidden_state.squeeze(0).cpu()
             
-            self.samples.append((embedding, label_int))
+            self.samples.append((embedding, label_int, file_path))
             
             if (i + 1) % 100 == 0:
                 print(f"Processed {i+1}/{len(df)} clips")
@@ -91,7 +92,7 @@ class EmoDBDataset(Dataset):
         return len(self.samples)
     
     def __getitem__(self, idx):
-        embedding, label = self.samples[idx]
+        embedding, label, _ = self.samples[idx]
         return embedding, torch.tensor(label, dtype=torch.long)
 
 
@@ -118,7 +119,7 @@ print(f"Labels batch shape: {labels_batch.shape}")
 print(f"Label example: {[idx2label[l.item()] for l in labels_batch]}")
 
 # Save to disk
-SAVE_PATH = "emodb_embeddings.pt"
+SAVE_PATH = "embeddings/emodb_embeddings.pt"
 
 print(f"\nSaving embeddings to {SAVE_PATH}...")
 torch.save({
@@ -126,6 +127,8 @@ torch.save({
     'embeddings': [s[0] for s in dataset.samples],
     # list of ints
     'labels': [s[1] for s in dataset.samples],
+    # list of str — used for speaker-independent splitting
+    'file_paths': [s[2] for s in dataset.samples],
     'label2idx': label2idx,
     'idx2label': idx2label,
     'T_audio': dataset.samples[0][0].shape[0],

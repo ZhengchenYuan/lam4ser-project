@@ -1,0 +1,15 @@
+# Install PyTorch separately — version depends on GPU:
+#
+#   Pascal (CC 6.x, e.g. Titan X Pascal) — last supported in PyTorch 2.2:
+#     pip install torch==2.2.2 --index-url https://download.pytorch.org/whl/cu118
+#
+#   Volta / Turing / Ampere / Hopper (CC 7.0+, e.g. V100, A100, RTX series):
+#     pip install torch --index-url https://download.pytorch.org/whl/cu128
+
+# Pin below 4.47 — newer versions require PyTorch >= 2.4
+transformers>=4.30.0,<4.47.0
+scikit-learn>=1.3.0
+matplotlib>=3.7.0
+numpy>=1.24.0,<2.0.0
+audb>=1.7.0
+audiofile>=1.3.0
