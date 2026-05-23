@@ -6,7 +6,7 @@ This module compresses audio embeddings from wav2vec2 before passing them to the
 
 **Pipeline position:**
 ```
-Person 1 (wav2vec2) → Person 2 (compression) → Person 3 (cross-attention) → Person 4 (training)
+Person 1 (wav2vec2) → Person 2 (compression) → Person 3 (cross-attention)
 ```
 
 ## Problem
