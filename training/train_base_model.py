@@ -1,3 +1,4 @@
+import argparse
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -14,27 +15,32 @@ from data.dataset import EmoDBFusionDataset, speaker_independent_split
 from models.compression.compressor import AudioCompressor
 from models.audio_gpt2 import AudioGPT2
 
-CONFIG = {
-    "embeddings_path": "embeddings/emodb_embeddings.pt",
-    "batch_size": 8,
-    "lr": 1e-5,
-    "epochs": 100,
-    "adapter_dim": 64,
-    "dropout": 0.3,
-    "target_audio_len": 50,
-    "device": "cuda" if torch.cuda.is_available() else "cpu",
-    "val_speakers": ["09", "10"],
-    "test_speakers": ["03", "08"],
-    "checkpoint_path": "best_model.pt",
-    "loss_curve_path": "loss_curve.png",
-}
+
+def _build_config(encoder: str) -> dict:
+    os.makedirs("checkpoints", exist_ok=True)
+    return {
+        "encoder": encoder,
+        "embeddings_path": f"embeddings/{encoder}_embeddings.pt",
+        "batch_size": 8,
+        "lr": 1e-5,
+        "epochs": 100,
+        "adapter_dim": 64,
+        "dropout": 0.3,
+        "target_audio_len": 50,
+        "device": "cuda" if torch.cuda.is_available() else "cpu",
+        "val_speakers": ["09", "10"],
+        "test_speakers": ["03", "08"],
+        "checkpoint_path": f"checkpoints/{encoder}_best.pt",
+        "loss_curve_path": f"checkpoints/{encoder}_loss_curve.png",
+    }
 
 
-def smoke_test(audio_dim=768):
+def smoke_test(config):
+    audio_dim = 768
     input_ids = torch.randint(0, 50256, (2, 32))
     audio = torch.randn(2, 50, audio_dim)
 
-    model = AudioGPT2(num_classes=7, audio_dim=audio_dim, adapter_dim=CONFIG["adapter_dim"], dropout=CONFIG["dropout"])
+    model = AudioGPT2(num_classes=7, audio_dim=audio_dim, adapter_dim=config["adapter_dim"], dropout=config["dropout"])
     logits = model(input_ids, audio)
 
     assert logits.shape == (2, 7), f"Expected logits shape (2, 7), got {logits.shape}"
@@ -42,40 +48,40 @@ def smoke_test(audio_dim=768):
     print("✓ Smoke test passed")
 
 
-def train():
-    if not os.path.exists(CONFIG["embeddings_path"]):
+def train(config):
+    if not os.path.exists(config["embeddings_path"]):
         print(
-            f"ERROR: '{CONFIG['embeddings_path']}' not found. "
-            "Run models/fusion/preprocessing.py first to generate the embeddings file."
+            f"ERROR: '{config['embeddings_path']}' not found. "
+            "Run models/audio_encoder/preprocessing.py first to generate the embeddings file."
         )
         sys.exit(1)
 
-    dataset = EmoDBFusionDataset(CONFIG["embeddings_path"])
+    dataset = EmoDBFusionDataset(config["embeddings_path"])
     train_idx, val_idx, test_idx = speaker_independent_split(
         dataset,
-        val_speakers=CONFIG["val_speakers"],
-        test_speakers=CONFIG["test_speakers"],
+        val_speakers=config["val_speakers"],
+        test_speakers=config["test_speakers"],
     )
 
     train_loader = DataLoader(
-        Subset(dataset, train_idx), batch_size=CONFIG["batch_size"], shuffle=True
+        Subset(dataset, train_idx), batch_size=config["batch_size"], shuffle=True
     )
     val_loader = DataLoader(
-        Subset(dataset, val_idx), batch_size=CONFIG["batch_size"], shuffle=False
+        Subset(dataset, val_idx), batch_size=config["batch_size"], shuffle=False
     )
     test_loader = DataLoader(
-        Subset(dataset, test_idx), batch_size=CONFIG["batch_size"], shuffle=False
+        Subset(dataset, test_idx), batch_size=config["batch_size"], shuffle=False
     )
 
-    device = CONFIG["device"]
-    compressor = AudioCompressor(target_len=CONFIG["target_audio_len"]).to(device)
+    device = config["device"]
+    compressor = AudioCompressor(target_len=config["target_audio_len"]).to(device)
     num_classes = len(dataset.label2idx)
     audio_dim = dataset.embeddings[0].shape[-1]
     model = AudioGPT2(
         num_classes=num_classes,
         audio_dim=audio_dim,
-        adapter_dim=CONFIG["adapter_dim"],
-        dropout=CONFIG["dropout"],
+        adapter_dim=config["adapter_dim"],
+        dropout=config["dropout"],
     ).to(device)
 
     train_labels = [dataset[i]["label"].item() for i in train_idx]
@@ -86,10 +92,10 @@ def train():
 
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(
-        trainable_params, lr=CONFIG["lr"], weight_decay=1e-2
+        trainable_params, lr=config["lr"], weight_decay=1e-2
     )
 
-    epochs = CONFIG["epochs"]
+    epochs = config["epochs"]
     total_steps = epochs * len(train_loader)
     warmup_steps = int(0.1 * total_steps)
     scheduler = get_linear_schedule_with_warmup(
@@ -163,17 +169,18 @@ def train():
             torch.save(
                 {
                     "epoch": epoch,
+                    "encoder": config["encoder"],
                     "model_state_dict": model.state_dict(),
                     "val_loss": epoch_val_loss,
                     "val_acc": val_acc,
                     "val_f1": val_f1,
                     "idx2label": dataset.idx2label,
                 },
-                CONFIG["checkpoint_path"],
+                config["checkpoint_path"],
             )
             print(f"  ✓ Saved best checkpoint (val_loss: {epoch_val_loss:.4f})")
 
-    checkpoint = torch.load(CONFIG["checkpoint_path"], map_location=device, weights_only=False)
+    checkpoint = torch.load(config["checkpoint_path"], map_location=device, weights_only=False)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
@@ -207,13 +214,22 @@ def train():
     plt.plot(range(1, epochs + 1), val_losses, label="Val loss")
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
-    plt.title("Training and validation loss")
+    plt.title(f"Training and validation loss ({config['encoder']})")
     plt.legend()
-    plt.savefig(CONFIG["loss_curve_path"])
+    plt.savefig(config["loss_curve_path"])
     plt.close()
-    print(f"\nLoss curve saved to {CONFIG['loss_curve_path']}")
+    print(f"\nLoss curve saved to {config['loss_curve_path']}")
 
 
 if __name__ == "__main__":
-    smoke_test()
-    train()
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--encoder",
+        default="wav2vec2-base",
+        choices=["wav2vec2-base", "wav2vec2-large-emotion", "wavlm-large", "hubert-large"],
+        help="Which encoder's embeddings to train on",
+    )
+    args = parser.parse_args()
+    config = _build_config(args.encoder)
+    smoke_test(config)
+    train(config)
