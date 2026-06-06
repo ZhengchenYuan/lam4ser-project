@@ -3,9 +3,16 @@ import torch
 from torch.utils.data import Dataset
 from transformers import GPT2Tokenizer
 
-from data.prompts import LABELS, get_prompt
+from data.prompts import get_prompt
 from features.acoustic_features import extract_acoustic_features
 from features.feature_prompt import acoustic_features_to_text
+
+
+def extract_speaker_id(file_path: str) -> str:
+    basename = os.path.basename(file_path)
+    if len(basename) < 2:
+        return "unknown"
+    return basename[:2]
 
 
 class EmoDBGenerationDataset(Dataset):
@@ -42,10 +49,20 @@ class EmoDBGenerationDataset(Dataset):
         self.idx2label = data["idx2label"]
 
         self.file_paths = None
+        self.speaker_ids = None
+
         for key in ("file_paths", "paths", "files"):
             if key in data:
                 self.file_paths = data[key]
+                self.speaker_ids = [extract_speaker_id(p) for p in self.file_paths]
                 break
+
+        if self.speaker_ids is None:
+            print(
+                "WARNING: No file paths found in embeddings file.\n"
+                "Speaker-independent splitting is not available.\n"
+                "Falling back to random 70/15/15 split."
+            )
 
         if self.use_feature_prompt and self.file_paths is None:
             raise ValueError(
@@ -76,7 +93,10 @@ class EmoDBGenerationDataset(Dataset):
 
                 for i, wav_path in enumerate(self.file_paths):
                     if i % 50 == 0:
-                        print(f"  Extracting acoustic features: {i}/{len(self.file_paths)}")
+                        print(
+                            f"  Extracting acoustic features: "
+                            f"{i}/{len(self.file_paths)}"
+                        )
 
                     feature_dict = extract_acoustic_features(wav_path)
                     self.acoustic_feature_cache.append(feature_dict)
@@ -92,7 +112,9 @@ class EmoDBGenerationDataset(Dataset):
             input_ids, lm_labels = self._build_generation_sample(idx)
             self.input_ids_list.append(input_ids)
             self.lm_labels_list.append(lm_labels)
-            self.class_labels_list.append(torch.tensor(self.labels[idx], dtype=torch.long))
+            self.class_labels_list.append(
+                torch.tensor(self.labels[idx], dtype=torch.long)
+            )
 
     def _label_to_text(self, label_idx: int) -> str:
         if isinstance(self.idx2label, dict):
