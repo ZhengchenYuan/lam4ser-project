@@ -109,3 +109,129 @@ Full comparison on the test set (162 samples, speaker-independent split):
 ```
 
 Best result: **AudioGPT2 + wav2vec2-large-emotion, 93.2% accuracy / 88.2% weighted F1**. This is also the one case where AudioGPT2 clearly beats the MLP probe. For WavLM-large and HuBERT-large the MLP probe wins, likely because 493 training samples is not enough for the cross-attention adapters to outperform a smaller model. Numbers will be lower on naturalistic datasets since EMoDB is acted speech in a clean studio. See `training_notes.txt` for the full run-by-run history.
+
+
+---
+
+## Yuan's Extensions
+
+This part extends the WavLM-large AudioGPT2 setup with prompt variants, acoustic feature text, and autoregressive label generation.
+
+### `data/`
+
+`prompts.py`: stores all prompt templates used in the prompt ablation and generation experiments.
+
+Supported prompt types:
+
+- `base`: simple classifier prompt
+- `label_list`: classifier prompt with all possible emotion labels
+- `feature`: classifier prompt with acoustic feature text
+- `generation`: autoregressive prompt for label generation
+- `feature_generation`: autoregressive prompt with acoustic feature text
+
+The acoustic feature text is inserted into the GPT-2 prompt, not into the WavLM audio embedding stream.
+
+`generation_dataset.py`: dataset for autoregressive label generation. It builds `prompt + target label text` and masks the prompt tokens with `-100`, so the language-model loss is only computed on the target label tokens.
+
+### `features/`
+
+`acoustic_features.py`: extracts acoustic features from the original wav files using `librosa`.
+
+Extracted features:
+
+- duration: `librosa.get_duration`
+- pitch mean/std: `librosa.pyin`
+- energy mean/std: `librosa.feature.rms`
+- tempo: `librosa.beat.tempo`
+
+Each wav file is loaded as a 16 kHz mono waveform:
+
+```python
+librosa.load(str(wav_path), sr=16000, mono=True)
+```
+
+`feature_prompt.py`: converts numeric acoustic features into short text descriptions, for example:
+
+```text
+high pitch, moderate pitch variation, high energy, short duration
+```
+
+The acoustic feature cache is saved to:
+
+```text
+embeddings/wavlm-large_acoustic_features.pt
+```
+
+### `models/`
+
+`audio_gpt2_generation.py`: autoregressive version of AudioGPT2.
+
+The original classifier model predicts emotion classes with a classifier head:
+
+```text
+last token hidden state -> classifier head -> 7 emotion logits
+```
+
+The generation model predicts the emotion label as text:
+
+```text
+hidden states -> GPT-2 LM head -> generated label text
+```
+
+The target label space is still the same 7 EMoDB emotions, but the model outputs text such as `anger`, `neutral`, or `sadness`.
+
+### `training/`
+
+`train_base_model.py`: now supports prompt variants through `--prompt_type`.
+
+Classifier prompt experiments:
+
+```bash
+python training/train_base_model.py --encoder wavlm-large --prompt_type base
+python training/train_base_model.py --encoder wavlm-large --prompt_type label_list
+python training/train_base_model.py --encoder wavlm-large --prompt_type feature
+```
+
+`train_generation_model.py`: trains the autoregressive label generation model.
+
+Generation experiments:
+
+```bash
+python training/train_generation_model.py --encoder wavlm-large --prompt_type generation
+python training/train_generation_model.py --encoder wavlm-large --prompt_type feature_generation
+```
+
+### `evaluation/`
+
+`evaluate_generation.py`: evaluates generated emotion labels by mapping generated text back to the 7 emotion classes. It reports accuracy, weighted F1, generated label validity, prediction distribution, and confusion matrix.
+
+Run with:
+
+```bash
+python evaluation/evaluate_generation.py --encoder wavlm-large --prompt_type generation
+python evaluation/evaluate_generation.py --encoder wavlm-large --prompt_type feature_generation
+```
+
+---
+
+## Yuan's Results
+
+All experiments below use **WavLM-large embeddings** and the same speaker-independent EMoDB split.
+
+```text
+                                      Accuracy   Weighted F1   Validity
+  classifier + base                    88.27%        87.99%          -
+  classifier + label_list              87.04%        87.28%          -
+  classifier + feature                 83.33%        83.18%          -
+  generation                           89.51%        89.29%     100.00%
+  feature_generation                   78.40%        78.32%     100.00%
+```
+
+Best result in this part: **autoregressive generation with WavLM-large, 89.51% accuracy / 89.29% weighted F1**.
+
+Main observations:
+
+- Autoregressive generation performs best within the WavLM-large setting.
+- Adding the label list does not improve the classifier baseline.
+- Acoustic feature text prompts reduce performance in both classifier and generation settings.
+- Generated labels are valid, but greedy decoding often repeats the label.
