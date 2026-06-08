@@ -3,7 +3,9 @@ import torch
 from torch.utils.data import Dataset
 from transformers import GPT2Tokenizer
 
-_PROMPT = "Classify the emotion of this speech:"
+from data.prompts import PROMPTS, get_prompt
+from features.acoustic_features import extract_acoustic_features
+from features.feature_prompt import acoustic_features_to_text
 
 
 def extract_speaker_id(file_path: str) -> str:
@@ -14,7 +16,13 @@ def extract_speaker_id(file_path: str) -> str:
 
 
 class EmoDBFusionDataset(Dataset):
-    def __init__(self, embeddings_path: str):
+    def __init__(
+        self,
+        embeddings_path: str,
+        prompt_type: str = "base",
+        use_feature_prompt: bool = False,
+        max_length: int = 64,
+    ):
         if not os.path.exists(embeddings_path):
             print(
                 f"ERROR: '{embeddings_path}' not found. "
@@ -22,42 +30,144 @@ class EmoDBFusionDataset(Dataset):
             )
             raise FileNotFoundError(f"'{embeddings_path}' not found")
 
+        if prompt_type not in PROMPTS:
+            raise ValueError(
+                f"Unknown prompt_type: {prompt_type}. "
+                f"Available prompt types: {list(PROMPTS.keys())}"
+            )
+
+        self.embeddings_path = embeddings_path
+        self.prompt_type = prompt_type
+        self.use_feature_prompt = use_feature_prompt or ("feature" in prompt_type)
+        self.max_length = max_length
+
         data = torch.load(embeddings_path, weights_only=False)
+
         self.embeddings = data["embeddings"]
         self.labels = data["labels"]
         self.label2idx = data["label2idx"]
         self.idx2label = data["idx2label"]
 
+        # ------------------------------------------------------------
+        # Save original wav file paths if available.
+        # These are needed for:
+        # 1. speaker-independent split
+        # 2. acoustic feature extraction
+        # ------------------------------------------------------------
+        self.file_paths = None
         self.speaker_ids = None
+
         for key in ("file_paths", "paths", "files"):
             if key in data:
-                self.speaker_ids = [extract_speaker_id(p) for p in data[key]]
+                self.file_paths = data[key]
+                self.speaker_ids = [extract_speaker_id(p) for p in self.file_paths]
                 break
 
         if self.speaker_ids is None:
             print(
-                "WARNING: No file paths found in emodb_embeddings.pt.\n"
+                "WARNING: No file paths found in embeddings file.\n"
                 "Speaker-independent splitting is not available.\n"
                 "Falling back to random 70/15/15 split."
             )
 
-        tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
-        tokenizer.pad_token = tokenizer.eos_token
-        encoded = tokenizer(
-            _PROMPT,
-            max_length=32,
-            padding="max_length",
-            truncation=True,
-            return_tensors="pt",
-        )
-        self.input_ids = encoded["input_ids"].squeeze(0)  # [32]
+        if self.use_feature_prompt and self.file_paths is None:
+            raise ValueError(
+                "Feature prompt requires wav file paths, but no key among "
+                "('file_paths', 'paths', 'files') was found in the embeddings file."
+            )
+
+        # ------------------------------------------------------------
+        # GPT-2 tokenizer
+        # ------------------------------------------------------------
+        self.tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+        self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        # ------------------------------------------------------------
+        # Acoustic feature extraction cache
+        #
+        # Example:
+        # embeddings/wavlm-large_embeddings.pt
+        # ->
+        # embeddings/wavlm-large_acoustic_features.pt
+        # ------------------------------------------------------------
+        self.acoustic_feature_cache = None
+
+        if self.use_feature_prompt:
+            cache_path = embeddings_path.replace(
+                "_embeddings.pt",
+                "_acoustic_features.pt",
+            )
+
+            if os.path.exists(cache_path):
+                print(f"Loading cached acoustic features from: {cache_path}")
+                self.acoustic_feature_cache = torch.load(
+                    cache_path,
+                    weights_only=False,
+                )
+            else:
+                print("Extracting acoustic features from wav files...")
+                self.acoustic_feature_cache = []
+
+                for i, wav_path in enumerate(self.file_paths):
+                    if i % 50 == 0:
+                        print(f"  Extracting acoustic features: {i}/{len(self.file_paths)}")
+
+                    feature_dict = extract_acoustic_features(wav_path)
+                    self.acoustic_feature_cache.append(feature_dict)
+
+                torch.save(self.acoustic_feature_cache, cache_path)
+                print(f"Saved acoustic feature cache to: {cache_path}")
+
+        # ------------------------------------------------------------
+        # Build prompt tokens per sample.
+        #
+        # Old version:
+        #   one fixed self.input_ids for all samples
+        #
+        # New version:
+        #   self.input_ids_list[idx] can be different for each sample,
+        #   especially for acoustic feature prompts.
+        # ------------------------------------------------------------
+        self.input_ids_list = []
+
+        for idx in range(len(self.embeddings)):
+            prompt = self._build_prompt_for_sample(idx)
+
+            encoded = self.tokenizer(
+                prompt,
+                max_length=self.max_length,
+                padding="max_length",
+                truncation=True,
+                return_tensors="pt",
+            )
+
+            self.input_ids_list.append(encoded["input_ids"].squeeze(0))
+
+    def _build_prompt_for_sample(self, idx: int) -> str:
+        """
+        Build prompt for one sample.
+
+        base / label_list:
+            same prompt for all samples.
+
+        feature / feature_generation:
+            acoustic features are loaded or extracted,
+            converted into text,
+            and inserted into the prompt.
+        """
+        if self.use_feature_prompt:
+            features = self.acoustic_feature_cache[idx]
+            feature_text = acoustic_features_to_text(features)
+            return get_prompt(self.prompt_type, features=feature_text)
+
+        return get_prompt(self.prompt_type)
 
     def __len__(self):
         return len(self.embeddings)
 
     def __getitem__(self, idx):
         return {
-            "input_ids": self.input_ids,
+            "input_ids": self.input_ids_list[idx],
             "audio": self.embeddings[idx],
             "label": torch.tensor(self.labels[idx], dtype=torch.long),
         }
@@ -102,6 +212,7 @@ def speaker_independent_split(dataset, val_speakers=None, test_speakers=None):
             train_indices.append(i)
 
     train_speakers = sorted(set(dataset.speaker_ids[i] for i in train_indices))
+
     print("Speaker split summary:")
     print(f"  Train speakers: {train_speakers} → {len(train_indices)} samples")
     print(f"  Val   speakers: {sorted(val_speakers)} → {len(val_indices)} samples")

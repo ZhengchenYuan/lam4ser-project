@@ -6,25 +6,22 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import torch.nn as nn
-import numpy as np
 from torch.utils.data import DataLoader, Subset
 from transformers import get_linear_schedule_with_warmup
-from sklearn.metrics import f1_score, confusion_matrix
-from sklearn.utils.class_weight import compute_class_weight
-import matplotlib.pyplot as plt
 
-from data.dataset import EmoDBFusionDataset, speaker_independent_split
+from data.generation_dataset import EmoDBGenerationDataset
+from data.dataset import speaker_independent_split
 from models.compression.compressor import AudioCompressor
-from models.audio_gpt2 import AudioGPT2
+from models.audio_gpt2_generation import AudioGPT2Generation
 
 
 def _build_config(
     encoder: str,
+    prompt_type: str = "generation",
     lora_rank: int = 0,
     lora_lr: float = 1e-4,
-    prompt_type: str = "base",
 ) -> dict:
-    tag = f"{encoder}_{prompt_type}"
+    tag = f"{encoder}_{prompt_type}_generation"
 
     if lora_rank > 0:
         tag += f"_lora{lora_rank}"
@@ -34,11 +31,11 @@ def _build_config(
     return {
         "encoder": encoder,
         "prompt_type": prompt_type,
-        "max_prompt_length": 64 if "feature" in prompt_type else 32,
+        "max_prompt_length": 128 if "feature" in prompt_type else 96,
         "lora_rank": lora_rank,
         "lora_lr": lora_lr,
         "embeddings_path": f"embeddings/{encoder}_embeddings.pt",
-        "batch_size": 8,
+        "batch_size": 4,
         "lr": 1e-5,
         "epochs": 100,
         "adapter_dim": 64,
@@ -48,7 +45,6 @@ def _build_config(
         "val_speakers": ["09", "10"],
         "test_speakers": ["03", "08"],
         "checkpoint_path": f"checkpoints/{tag}_best.pt",
-        "loss_curve_path": f"checkpoints/{tag}_loss_curve.png",
     }
 
 
@@ -59,8 +55,7 @@ def smoke_test(config):
     input_ids = torch.randint(0, 50256, (2, prompt_len))
     audio = torch.randn(2, 50, audio_dim)
 
-    model = AudioGPT2(
-        num_classes=7,
+    model = AudioGPT2Generation(
         audio_dim=audio_dim,
         adapter_dim=config["adapter_dim"],
         dropout=config["dropout"],
@@ -69,9 +64,11 @@ def smoke_test(config):
 
     logits = model(input_ids, audio)
 
-    assert logits.shape == (2, 7), f"Expected logits shape (2, 7), got {logits.shape}"
+    assert logits.shape[0] == 2, f"Expected batch size 2, got {logits.shape[0]}"
+    assert logits.shape[1] == prompt_len, f"Expected seq len {prompt_len}, got {logits.shape[1]}"
+    assert logits.shape[2] == 50257, f"Expected GPT-2 vocab size 50257, got {logits.shape[2]}"
 
-    print("✓ Smoke test passed")
+    print("✓ Generation smoke test passed")
 
 
 def train(config):
@@ -82,8 +79,8 @@ def train(config):
         )
         sys.exit(1)
 
-    dataset = EmoDBFusionDataset(
-        config["embeddings_path"],
+    dataset = EmoDBGenerationDataset(
+        embeddings_path=config["embeddings_path"],
         prompt_type=config["prompt_type"],
         max_length=config["max_prompt_length"],
     )
@@ -116,28 +113,16 @@ def train(config):
 
     compressor = AudioCompressor(target_len=config["target_audio_len"]).to(device)
 
-    num_classes = len(dataset.label2idx)
     audio_dim = dataset.embeddings[0].shape[-1]
 
-    model = AudioGPT2(
-        num_classes=num_classes,
+    model = AudioGPT2Generation(
         audio_dim=audio_dim,
         adapter_dim=config["adapter_dim"],
         dropout=config["dropout"],
         lora_rank=config["lora_rank"],
     ).to(device)
 
-    train_labels = [dataset[i]["label"].item() for i in train_idx]
-
-    class_weights = compute_class_weight(
-        "balanced",
-        classes=np.arange(num_classes),
-        y=train_labels,
-    )
-
-    criterion = nn.CrossEntropyLoss(
-        weight=torch.tensor(class_weights, dtype=torch.float).to(device)
-    )
+    criterion = nn.CrossEntropyLoss(ignore_index=-100)
 
     trainable_params = [p for p in model.parameters() if p.requires_grad]
 
@@ -178,10 +163,9 @@ def train(config):
         num_training_steps=total_steps,
     )
 
-    train_losses, val_losses = [], []
     best_val_loss = float("inf")
 
-    print("\nTraining configuration:")
+    print("\nGeneration training configuration:")
     print(f"  Encoder:      {config['encoder']}")
     print(f"  Prompt type:  {config['prompt_type']}")
     print(f"  Prompt length:{config['max_prompt_length']}")
@@ -196,12 +180,17 @@ def train(config):
 
         for batch in train_loader:
             input_ids = batch["input_ids"].to(device)
+            labels = batch["labels"].to(device)
             audio = batch["audio"].to(device)
-            labels = batch["label"].to(device)
 
             audio_compressed = compressor(audio)
+
             logits = model(input_ids, audio_compressed)
-            loss = criterion(logits, labels)
+
+            loss = criterion(
+                logits.view(-1, logits.size(-1)),
+                labels.view(-1),
+            )
 
             optimizer.zero_grad()
             loss.backward()
@@ -215,38 +204,30 @@ def train(config):
 
         model.eval()
         epoch_val_loss = 0.0
-        all_preds, all_labels = [], []
 
         with torch.no_grad():
             for batch in val_loader:
                 input_ids = batch["input_ids"].to(device)
+                labels = batch["labels"].to(device)
                 audio = batch["audio"].to(device)
-                labels = batch["label"].to(device)
 
                 audio_compressed = compressor(audio)
+
                 logits = model(input_ids, audio_compressed)
-                loss = criterion(logits, labels)
+
+                loss = criterion(
+                    logits.view(-1, logits.size(-1)),
+                    labels.view(-1),
+                )
 
                 epoch_val_loss += loss.item()
 
-                preds = logits.argmax(dim=-1)
-                all_preds.extend(preds.cpu().tolist())
-                all_labels.extend(labels.cpu().tolist())
-
         epoch_val_loss /= len(val_loader)
-
-        val_acc = sum(p == l for p, l in zip(all_preds, all_labels)) / len(all_labels)
-        val_f1 = f1_score(all_labels, all_preds, average="weighted")
-
-        train_losses.append(epoch_train_loss)
-        val_losses.append(epoch_val_loss)
 
         print(
             f"Epoch {epoch:2d}/{epochs} | "
             f"train_loss: {epoch_train_loss:.4f} | "
-            f"val_loss: {epoch_val_loss:.4f} | "
-            f"val_acc: {val_acc:.4f} | "
-            f"val_f1: {val_f1:.4f}"
+            f"val_loss: {epoch_val_loss:.4f}"
         )
 
         if epoch_val_loss < best_val_loss:
@@ -261,8 +242,6 @@ def train(config):
                     "lora_rank": config["lora_rank"],
                     "model_state_dict": model.state_dict(),
                     "val_loss": epoch_val_loss,
-                    "val_acc": val_acc,
-                    "val_f1": val_f1,
                     "idx2label": dataset.idx2label,
                     "label2idx": dataset.label2idx,
                     "config": config,
@@ -270,7 +249,7 @@ def train(config):
                 config["checkpoint_path"],
             )
 
-            print(f"  ✓ Saved best checkpoint (val_loss: {epoch_val_loss:.4f})")
+            print(f"  ✓ Saved best generation checkpoint (val_loss: {epoch_val_loss:.4f})")
 
     checkpoint = torch.load(
         config["checkpoint_path"],
@@ -278,54 +257,42 @@ def train(config):
         weights_only=False,
     )
 
-    model.load_state_dict(checkpoint["model_state_dict"])
-    model.eval()
+    print(f"\nBest checkpoint saved at epoch {checkpoint['epoch']}")
+    print(f"Best val loss: {checkpoint['val_loss']:.4f}")
 
-    all_preds, all_labels = [], []
+    test_loss = evaluate_loss(
+        model=model,
+        compressor=compressor,
+        loader=test_loader,
+        criterion=criterion,
+        device=device,
+    )
+
+    print(f"Test LM loss: {test_loss:.4f}")
+
+
+def evaluate_loss(model, compressor, loader, criterion, device):
+    model.eval()
+    total_loss = 0.0
 
     with torch.no_grad():
-        for batch in test_loader:
+        for batch in loader:
             input_ids = batch["input_ids"].to(device)
+            labels = batch["labels"].to(device)
             audio = batch["audio"].to(device)
-            labels = batch["label"].to(device)
 
             audio_compressed = compressor(audio)
+
             logits = model(input_ids, audio_compressed)
 
-            preds = logits.argmax(dim=-1)
+            loss = criterion(
+                logits.view(-1, logits.size(-1)),
+                labels.view(-1),
+            )
 
-            all_preds.extend(preds.cpu().tolist())
-            all_labels.extend(labels.cpu().tolist())
+            total_loss += loss.item()
 
-    test_acc = sum(p == l for p, l in zip(all_preds, all_labels)) / len(all_labels)
-    test_f1 = f1_score(all_labels, all_preds, average="weighted")
-    cm = confusion_matrix(all_labels, all_preds)
-
-    label_names = [dataset.idx2label[i] for i in range(len(dataset.idx2label))]
-
-    print(f"\nTest results (best checkpoint, epoch {checkpoint['epoch']}):")
-    print(f"  Encoder:      {config['encoder']}")
-    print(f"  Prompt type:  {config['prompt_type']}")
-    print(f"  Accuracy:     {test_acc:.4f}")
-    print(f"  Weighted F1:  {test_f1:.4f}")
-    print(f"\nConfusion matrix (rows=true, cols=pred):")
-    print(f"  Labels: {label_names}")
-    print(cm)
-
-    plt.figure()
-    plt.plot(range(1, epochs + 1), train_losses, label="Train loss")
-    plt.plot(range(1, epochs + 1), val_losses, label="Val loss")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.title(
-        f"Training and validation loss "
-        f"({config['encoder']}, {config['prompt_type']})"
-    )
-    plt.legend()
-    plt.savefig(config["loss_curve_path"])
-    plt.close()
-
-    print(f"\nLoss curve saved to {config['loss_curve_path']}")
+    return total_loss / len(loader)
 
 
 if __name__ == "__main__":
@@ -333,7 +300,7 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--encoder",
-        default="wav2vec2-base",
+        default="wavlm-large",
         choices=[
             "wav2vec2-base",
             "wav2vec2-large-emotion",
@@ -345,15 +312,12 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--prompt_type",
-        default="base",
+        default="generation",
         choices=[
-            "base",
-            "label_list",
-            "feature",
             "generation",
             "feature_generation",
         ],
-        help="Prompt template to use.",
+        help="Generation prompt template to use.",
     )
 
     parser.add_argument(
@@ -373,10 +337,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     config = _build_config(
-        args.encoder,
+        encoder=args.encoder,
+        prompt_type=args.prompt_type,
         lora_rank=args.lora_rank,
         lora_lr=args.lora_lr,
-        prompt_type=args.prompt_type,
     )
 
     smoke_test(config)
