@@ -19,9 +19,9 @@ This repository contains the group implementation for the ASL project.
 
 We use a speaker-independent split so the model never sees a speaker during training that it will be tested on.
 
-- Train: speakers 11, 12, 13, 14, 15, 16 -- 493 samples
-- Val:   speakers 09, 10 -- 161 samples
-- Test:  speakers 03, 08 -- 162 samples
+- Train: speakers 11, 12, 13, 14, 15, 16 (493 samples)
+- Val:   speakers 09, 10 (161 samples)
+- Test:  speakers 03, 08 (162 samples)
 
 Speaker IDs are extracted from the first two characters of the filename, which is how EMoDB encodes them.
 
@@ -32,8 +32,6 @@ Speaker IDs are extracted from the first two characters of the filename, which i
 ### `data/`
 
 `dataset.py` handles loading the pre-extracted embeddings from disk and the speaker-independent split logic. The dataset returns three things per sample: the fixed text prompt as input_ids, the audio embedding, and the label.
-
-Every sample gets the same text input ("Classify the emotion of this speech:").
 
 ### `models/audio_encoder/`
 
@@ -55,56 +53,59 @@ Output goes to `embeddings/{encoder-name}_embeddings.pt`. Supported encoders and
 | `wavlm-large` | microsoft/wavlm-large | 1024 |
 | `hubert-large` | facebook/hubert-large-ls960-ft | 1024 |
 
-- Audio is padded or truncated to 8 seconds max before encoding
-- Output embedding per clip: [T_audio, audio_dim], where T_audio varies by clip length
-- Embeddings are saved together with file paths (needed for speaker splitting) and label mappings
-- To add a new encoder, add one entry to the `ENCODERS` dict in preprocessing.py
 
 ### `models/compression/`
 
-`compressor.py` collapses variable-length audio sequences to a fixed length of 50 tokens using temporal mean pooling. This is needed because GPT-2 expects fixed-size inputs.
-
-Output shape: [B, 50, audio_dim] (audio_dim depends on the encoder, e.g. 768 or 1024)
+`compressor.py` collapses variable-length audio sequences to a fixed length of 50 tokens using temporal mean pooling.
 
 ### `models/fusion/`
 
 We inject audio information into GPT-2 at multiple layers using cross-attention adapters.
 
-`cross_attention.py` -- CrossAttentionAdapter takes text hidden states as query and audio hidden states as key/value, runs multi-head cross-attention, passes the output through a small bottleneck MLP (hidden_dim -> adapter_dim -> hidden_dim), and adds it back to the text hidden states with a residual connection + LayerNorm.
+`cross_attention.py`: CrossAttentionAdapter takes text hidden states as query and audio hidden states as key/value, runs multi-head cross-attention, passes the output through a small bottleneck MLP, and adds it back to the text hidden states with a residual connection + LayerNorm.
 
-`fusion_block.py` -- thin wrapper around CrossAttentionAdapter, handles the case where audio_dim != text_dim with a linear projection.
+`fusion_block.py`: thin wrapper around CrossAttentionAdapter, handles the case where audio_dim != text_dim with a linear projection.
 
 ### `models/`
 
-`audio_gpt2.py` -- the full model. GPT-2 is loaded and fully frozen (124M params, none trained). We attach one CrossAttentionAdapter after every third GPT-2 transformer block. Specifically at layers 2, 5, 8, 11.
+`audio_gpt2.py`: the full model. GPT-2 is loaded and fully frozen (124M params, none trained). We attach one CrossAttentionAdapter after every third GPT-2 transformer block (layers 2, 5, 8, 11). After the final layer, the last token's hidden state goes through a small classifier head (LayerNorm -> Linear -> GELU -> Dropout -> Linear).
 
-After the final GPT-2 layer, we take the last token's hidden state and pass it through a small classifier (LayerNorm -> Linear(768, 256) -> GELU -> Dropout -> Linear(256, 7)).
+Optional LoRA support: pass `--lora_rank` to inject low-rank updates into the GPT-2 attention weights alongside the cross-attention adapters.
 
-`AudioGPT2` accepts an `audio_dim` argument (default 768) which the training script reads automatically from the loaded embeddings file. If `audio_dim != 768`, each fusion block adds a Linear(audio_dim, 768) projection before the cross-attention.
-
-Trainable parameters: ~10M with 768-dim encoder, ~13.2M with 1024-dim encoder (the extra 3.1M are the four projection layers)
+Trainable parameters: ~10M with 768-dim encoder, ~13.2M with 1024-dim encoder.
 
 ### `training/`
 
-`train_base_model.py` -- training loop. Some specific choices worth noting:
-
-- **Optimizer**: AdamW with lr=1e-5 and weight_decay=1e-2. The low learning rate is because 493 training samples is very small dataset. A higher lr (tried 1e-4) causes the model to memorize the training set in a few epochs.
-- **LR schedule**: linear warmup for 10% of steps then linear decay to 0. Warmup helps with the cross-attention weights early in training.
-- **Loss**: cross-entropy with class weights computed from the training split using sklearn's compute_class_weight. Safeguard against class imbalance within the speaker split.
-- **Grad clipping**: norm clipped to 1.0
-- **Batch size**: 8
-- **Checkpointing**: saves the best model by validation loss
-
-Best configuration so far (after 4 training runs): 100 epochs, 4 fusion blocks, adapter_dim=64, dropout=0.3. See training_notes.txt for the full history.
+`train_base_model.py`: training loop. Pass `--encoder` to select which embeddings to train on; pass `--lora_rank` to enable LoRA. Key choices: AdamW lr=1e-5, linear warmup + decay, class-weighted cross-entropy, grad clipping at 1.0, batch size 8, 100 epochs. See `training_notes.txt` for the full run history.
 
 ### `evaluation/`
 
-`evaluate.py` -- computes accuracy, weighted F1, and confusion matrix on the test set using the saved best checkpoint.
+`evaluate.py`: computes accuracy, weighted F1, and confusion matrix on the test set using the saved best checkpoint.
+
+`compare_encoders.py`: evaluates all trained checkpoints in one pass and produces a grouped bar chart and confusion matrix for the best encoder.
+
+### `baselines/`
+
+Three baselines for comparison, all using the same speaker-independent split:
+
+`svm_mfcc.py`: SVM with 84 hand-crafted features (40 MFCCs mean+std, pitch, energy). Encoder-agnostic.
+
+`embedding_probes.py`: linear probe and MLP probe trained on top of frozen encoder embeddings. Run for all four encoders.
+
+`compare.py`: aggregates all baseline and AudioGPT2 results into a single comparison table and bar chart.
 
 ---
 
-## Results so far
+## Results
 
-Best test result (run 4, epoch 33 checkpoint, WavLM-large encoder): **88.3% accuracy, 88.2% weighted F1**
+Full comparison on the test set (162 samples, speaker-independent split):
 
-The encoder was the dominant factor. Swapping wav2vec2-base for WavLM-large took AudioGPT2 from 49.4% to 88.3% with no other changes. Note that EMoDB is acted speech in a clean studio. Numbers will be lower on naturalistic datasets. See `training_notes.txt` for the full run history.
+```
+                        hubert-large   wav2vec2-base   wav2vec2-large-emotion   wavlm-large
+  SVM + MFCC                  63.6%           63.6%                    63.6%         63.6%
+  linear probe                75.3%           49.4%                    85.2%         87.0%
+  MLP probe                   81.5%           42.0%                    85.8%         92.6%
+  AudioGPT2                   78.4%           42.6%                    93.2%         88.3%
+```
+
+Best result: **AudioGPT2 + wav2vec2-large-emotion, 93.2% accuracy / 88.2% weighted F1**. This is also the one case where AudioGPT2 clearly beats the MLP probe. For WavLM-large and HuBERT-large the MLP probe wins, likely because 493 training samples is not enough for the cross-attention adapters to outperform a smaller model. Numbers will be lower on naturalistic datasets since EMoDB is acted speech in a clean studio. See `training_notes.txt` for the full run-by-run history.
