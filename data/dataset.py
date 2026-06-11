@@ -9,10 +9,20 @@ from features.feature_prompt import acoustic_features_to_text
 
 
 def extract_speaker_id(file_path: str) -> str:
-    basename = os.path.basename(file_path)
-    if len(basename) < 2:
+    # EMoDB: speaker ID is the first two characters of the filename,
+    # e.g. "03a01Wa.wav" -> "03"
+    # basename = os.path.basename(file_path)
+    # if len(basename) < 2:
+    #     return "unknown"
+    # return basename[:2]
+
+    # AIBO: speaker ID is "{School}_{SpeakerNum}",
+    # e.g. "Mont_01_000_00.wav" -> "Mont_01"
+    basename = os.path.splitext(os.path.basename(file_path))[0]
+    parts = basename.split("_")
+    if len(parts) < 2:
         return "unknown"
-    return basename[:2]
+    return f"{parts[0]}_{parts[1]}"
 
 
 class EmoDBFusionDataset(Dataset):
@@ -174,10 +184,19 @@ class EmoDBFusionDataset(Dataset):
 
 
 def speaker_independent_split(dataset, val_speakers=None, test_speakers=None):
+    # EMoDB defaults:
+    # if test_speakers is None:
+    #     test_speakers = ["03", "08"]
+    # if val_speakers is None:
+    #     val_speakers = ["09", "10"]
+
+    # AIBO defaults: school-based split (IS2009 convention) -- train/val on the
+    # Ohm school, test on the Mont school -- with two Ohm speakers held out for
+    # validation (Ohm_31, Ohm_32; ~890 samples, all 5 classes represented).
     if test_speakers is None:
-        test_speakers = ["03", "08"]
+        test_speakers = [f"Mont_{i:02d}" for i in range(1, 26)]
     if val_speakers is None:
-        val_speakers = ["09", "10"]
+        val_speakers = ["Ohm_31", "Ohm_32"]
 
     if dataset.speaker_ids is None:
         torch.manual_seed(42)

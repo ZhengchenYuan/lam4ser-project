@@ -26,8 +26,9 @@ from models.audio_gpt2 import AudioGPT2
 ENCODERS = ["wav2vec2-base", "wav2vec2-large-emotion", "wavlm-large", "hubert-large"]
 ENCODER_LABELS = ["wav2vec2\nbase", "wav2vec2\nlarge-emotion", "wavlm\nlarge", "hubert\nlarge"]
 
-VAL_SPEAKERS  = ["09", "10"]
-TEST_SPEAKERS = ["03", "08"]
+# EMoDB: VAL_SPEAKERS = ["09", "10"], TEST_SPEAKERS = ["03", "08"]
+VAL_SPEAKERS  = ["Ohm_31", "Ohm_32"]
+TEST_SPEAKERS = [f"Mont_{i:02d}" for i in range(1, 26)]
 TARGET_AUDIO_LEN = 50
 BATCH_SIZE = 8
 OUTPUT_DIR = "checkpoints"
@@ -39,7 +40,7 @@ def _evaluate_checkpoint(checkpoint_path, device):
     idx2label = checkpoint["idx2label"]
     num_classes = len(idx2label)
 
-    embeddings_path = f"embeddings/{encoder}_embeddings.pt"
+    embeddings_path = f"embeddings/aibo_{encoder}_embeddings.pt"
     dataset = EmoDBFusionDataset(embeddings_path)
     _, _, test_idx = speaker_independent_split(
         dataset, val_speakers=VAL_SPEAKERS, test_speakers=TEST_SPEAKERS

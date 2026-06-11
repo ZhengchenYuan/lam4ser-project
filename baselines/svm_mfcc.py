@@ -1,5 +1,5 @@
 """
-SVM baseline for EMoDB emotion recognition.
+SVM baseline for AIBO emotion recognition (IS2009 Emotion Challenge, 5-class).
 
 Features: 40 MFCCs (mean + std), F0 (mean + std of voiced frames), RMS energy (mean + std).
 Uses the same speaker-independent split as the main model.
@@ -15,22 +15,46 @@ from sklearn.svm import SVC
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, classification_report
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-WAV_DIR = os.path.join(PROJECT_ROOT, "audb", "emodb", "2.0.0", "fe182b91", "wav")
+from data.dataset import extract_speaker_id
 
-VAL_SPEAKERS  = {"09", "10"}
-TEST_SPEAKERS = {"03", "08"}
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# EMoDB: WAV_DIR = os.path.join(PROJECT_ROOT, "audb", "emodb", "2.0.0", "fe182b91", "wav")
+WAV_DIR = os.path.join(PROJECT_ROOT, "dataset", "wav")
+LABELS_FILE = os.path.join(
+    PROJECT_ROOT, "dataset", "labels", "IS2009EmotionChallenge", "chunk_labels_5cl_corpus.txt"
+)
+
+# EMoDB: VAL_SPEAKERS = {"09", "10"}, TEST_SPEAKERS = {"03", "08"}
+VAL_SPEAKERS  = {"Ohm_31", "Ohm_32"}
+TEST_SPEAKERS = {f"Mont_{i:02d}" for i in range(1, 26)}
 N_MFCC        = 40
 SAMPLING_RATE = 16000
 
-_EMOTION_CODES = {
-    "W": "anger", "L": "boredom", "E": "disgust", "A": "fear",
-    "F": "happiness", "N": "neutral", "T": "sadness",
+# EMoDB:
+# _EMOTION_CODES = {
+#     "W": "anger", "L": "boredom", "E": "disgust", "A": "fear",
+#     "F": "happiness", "N": "neutral", "T": "sadness",
+# }
+
+# AIBO (IS2009 5-class codes):
+AIBO_LABEL_MAP = {
+    "A": "anger", "E": "emphatic", "N": "neutral", "P": "positive", "R": "rest",
 }
 
-def _parse_filename(path):
-    stem = os.path.splitext(os.path.basename(path))[0]
-    return stem[:2], _EMOTION_CODES.get(stem[5])
+
+def _load_label_index():
+    """Read the IS2009 5-class label file -> list of (wav_path, emotion, speaker_id)."""
+    index = []
+    with open(LABELS_FILE) as f:
+        for line in f:
+            parts = line.split()
+            if not parts:
+                continue
+            chunk_name, code = parts[0], parts[1]
+            wav_path = os.path.join(WAV_DIR, f"{chunk_name}.wav")
+            emotion = AIBO_LABEL_MAP[code]
+            index.append((wav_path, emotion, extract_speaker_id(wav_path)))
+    return index
 
 
 def _extract_features(path):
@@ -59,27 +83,21 @@ def run():
         print(f"ERROR: wav directory not found at {WAV_DIR}")
         sys.exit(1)
 
-    wav_files = sorted(f for f in os.listdir(WAV_DIR) if f.endswith(".wav"))
-    print(f"Found {len(wav_files)} wav files, extracting features...")
+    index = _load_label_index()
+    print(f"Found {len(index)} labeled samples, extracting features...")
 
-    emotion_classes = sorted(_EMOTION_CODES.values())
+    emotion_classes = sorted(set(AIBO_LABEL_MAP.values()))
     label2idx = {e: i for i, e in enumerate(emotion_classes)}
     idx2label  = {i: e for e, i in label2idx.items()}
 
     features, labels, speaker_ids = [], [], []
-    skipped = 0
-    for fname in wav_files:
-        path = os.path.join(WAV_DIR, fname)
-        speaker_id, emotion = _parse_filename(path)
-        if emotion is None:
-            skipped += 1
-            continue
+    for i, (path, emotion, speaker_id) in enumerate(index):
         features.append(_extract_features(path))
         labels.append(label2idx[emotion])
         speaker_ids.append(speaker_id)
 
-    if skipped:
-        print(f"Skipped {skipped} files with unrecognised emotion codes.")
+        if (i + 1) % 1000 == 0:
+            print(f"  {i + 1}/{len(index)}")
 
     features = np.array(features)
     labels   = np.array(labels)

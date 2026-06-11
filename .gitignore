@@ -14,6 +14,7 @@ data/*.pt
 embeddings/
 *.pt
 loss_curve.png
+dataset/
 
 # SLURM logs
 *.out

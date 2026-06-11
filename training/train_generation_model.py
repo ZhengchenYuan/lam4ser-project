@@ -34,7 +34,7 @@ def _build_config(
         "max_prompt_length": 128 if "feature" in prompt_type else 96,
         "lora_rank": lora_rank,
         "lora_lr": lora_lr,
-        "embeddings_path": f"embeddings/{encoder}_embeddings.pt",
+        "embeddings_path": f"embeddings/aibo_{encoder}_embeddings.pt",
         "batch_size": 4,
         "lr": 1e-5,
         "epochs": 100,
@@ -42,8 +42,9 @@ def _build_config(
         "dropout": 0.3,
         "target_audio_len": 50,
         "device": "cuda" if torch.cuda.is_available() else "cpu",
-        "val_speakers": ["09", "10"],
-        "test_speakers": ["03", "08"],
+        # EMoDB: "val_speakers": ["09", "10"], "test_speakers": ["03", "08"]
+        "val_speakers": ["Ohm_31", "Ohm_32"],
+        "test_speakers": [f"Mont_{i:02d}" for i in range(1, 26)],
         "checkpoint_path": f"checkpoints/{tag}_best.pt",
     }
 
@@ -75,7 +76,7 @@ def train(config):
     if not os.path.exists(config["embeddings_path"]):
         print(
             f"ERROR: '{config['embeddings_path']}' not found. "
-            "Run models/audio_encoder/preprocessing.py first to generate the embeddings file."
+            "Run models/audio_encoder/preprocessing_aibo.py first to generate the embeddings file."
         )
         sys.exit(1)
 

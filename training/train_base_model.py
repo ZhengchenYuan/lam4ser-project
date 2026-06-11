@@ -37,7 +37,7 @@ def _build_config(
         "max_prompt_length": 64 if "feature" in prompt_type else 32,
         "lora_rank": lora_rank,
         "lora_lr": lora_lr,
-        "embeddings_path": f"embeddings/{encoder}_embeddings.pt",
+        "embeddings_path": f"embeddings/aibo_{encoder}_embeddings.pt",
         "batch_size": 8,
         "lr": 1e-5,
         "epochs": 100,
@@ -45,8 +45,9 @@ def _build_config(
         "dropout": 0.3,
         "target_audio_len": 50,
         "device": "cuda" if torch.cuda.is_available() else "cpu",
-        "val_speakers": ["09", "10"],
-        "test_speakers": ["03", "08"],
+        # EMoDB: "val_speakers": ["09", "10"], "test_speakers": ["03", "08"]
+        "val_speakers": ["Ohm_31", "Ohm_32"],
+        "test_speakers": [f"Mont_{i:02d}" for i in range(1, 26)],
         "checkpoint_path": f"checkpoints/{tag}_best.pt",
         "loss_curve_path": f"checkpoints/{tag}_loss_curve.png",
     }
@@ -59,8 +60,9 @@ def smoke_test(config):
     input_ids = torch.randint(0, 50256, (2, prompt_len))
     audio = torch.randn(2, 50, audio_dim)
 
+    # AIBO: 5 emotion classes (EMoDB used 7)
     model = AudioGPT2(
-        num_classes=7,
+        num_classes=5,
         audio_dim=audio_dim,
         adapter_dim=config["adapter_dim"],
         dropout=config["dropout"],
@@ -69,7 +71,7 @@ def smoke_test(config):
 
     logits = model(input_ids, audio)
 
-    assert logits.shape == (2, 7), f"Expected logits shape (2, 7), got {logits.shape}"
+    assert logits.shape == (2, 5), f"Expected logits shape (2, 5), got {logits.shape}"
 
     print("✓ Smoke test passed")
 
@@ -78,7 +80,7 @@ def train(config):
     if not os.path.exists(config["embeddings_path"]):
         print(
             f"ERROR: '{config['embeddings_path']}' not found. "
-            "Run models/audio_encoder/preprocessing.py first to generate the embeddings file."
+            "Run models/audio_encoder/preprocessing_aibo.py first to generate the embeddings file."
         )
         sys.exit(1)
 

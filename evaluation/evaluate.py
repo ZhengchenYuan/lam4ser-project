@@ -12,12 +12,14 @@ from models.compression.compressor import AudioCompressor
 from models.audio_gpt2 import AudioGPT2
 
 CONFIG = {
-    "embeddings_path": "embeddings/emodb_embeddings.pt",
+    # EMoDB: "embeddings_path": "embeddings/emodb_embeddings.pt"
+    # EMoDB: "val_speakers": ["09", "10"], "test_speakers": ["03", "08"]
+    "embeddings_path": "embeddings/aibo_wavlm-large_embeddings.pt",
     "checkpoint_path": "best_model.pt",
     "target_audio_len": 50,
     "batch_size": 8,
-    "val_speakers": ["09", "10"],
-    "test_speakers": ["03", "08"],
+    "val_speakers": ["Ohm_31", "Ohm_32"],
+    "test_speakers": [f"Mont_{i:02d}" for i in range(1, 26)],
     "device": "cuda" if torch.cuda.is_available() else "cpu",
 }
 
@@ -27,7 +29,7 @@ def evaluate():
         if not __import__("os").path.exists(path):
             print(f"ERROR: '{path}' not found.")
             if path == CONFIG["embeddings_path"]:
-                print("  Run models/audio_encoder/preprocessing.py first.")
+                print("  Run models/audio_encoder/preprocessing_aibo.py first.")
             else:
                 print("  Run training/train_base_model.py first.")
             sys.exit(1)

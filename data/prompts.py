@@ -6,14 +6,24 @@ This file centralizes all prompt variants used by both:
 2. autoregressive label generation
 """
 
+# EMoDB (7-class):
+# LABELS = [
+#     "anger",
+#     "boredom",
+#     "disgust",
+#     "fear",
+#     "happiness",
+#     "neutral",
+#     "sadness",
+# ]
+
+# AIBO (5-class, IS2009 Emotion Challenge):
 LABELS = [
     "anger",
-    "boredom",
-    "disgust",
-    "fear",
-    "happiness",
+    "emphatic",
     "neutral",
-    "sadness",
+    "positive",
+    "rest",
 ]
 
 

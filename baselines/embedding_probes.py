@@ -23,10 +23,11 @@ from sklearn.utils.class_weight import compute_class_weight
 from data.dataset import extract_speaker_id
 
 # Default path
-EMBEDDINGS_PATH = "embeddings/wavlm-large_embeddings.pt"
+EMBEDDINGS_PATH = "embeddings/aibo_wavlm-large_embeddings.pt"
 
-VAL_SPEAKERS  = {"09", "10"}
-TEST_SPEAKERS = {"03", "08"}
+# EMoDB: VAL_SPEAKERS = {"09", "10"}, TEST_SPEAKERS = {"03", "08"}
+VAL_SPEAKERS  = {"Ohm_31", "Ohm_32"}
+TEST_SPEAKERS = {f"Mont_{i:02d}" for i in range(1, 26)}
 
 # Just linear
 class LinearProbe(nn.Module):

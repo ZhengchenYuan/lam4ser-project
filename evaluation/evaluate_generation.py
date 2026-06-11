@@ -30,14 +30,15 @@ def _build_config(
         "encoder": encoder,
         "prompt_type": prompt_type,
         "max_prompt_length": 128 if "feature" in prompt_type else 96,
-        "embeddings_path": f"embeddings/{encoder}_embeddings.pt",
+        "embeddings_path": f"embeddings/aibo_{encoder}_embeddings.pt",
         "batch_size": 1,
         "adapter_dim": 64,
         "dropout": 0.3,
         "target_audio_len": 50,
         "device": "cuda" if torch.cuda.is_available() else "cpu",
-        "val_speakers": ["09", "10"],
-        "test_speakers": ["03", "08"],
+        # EMoDB: "val_speakers": ["09", "10"], "test_speakers": ["03", "08"]
+        "val_speakers": ["Ohm_31", "Ohm_32"],
+        "test_speakers": [f"Mont_{i:02d}" for i in range(1, 26)],
         "checkpoint_path": checkpoint_path or f"checkpoints/{tag}_best.pt",
         "max_new_tokens": 5,
     }

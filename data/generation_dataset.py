@@ -9,10 +9,20 @@ from features.feature_prompt import acoustic_features_to_text
 
 
 def extract_speaker_id(file_path: str) -> str:
-    basename = os.path.basename(file_path)
-    if len(basename) < 2:
+    # EMoDB: speaker ID is the first two characters of the filename,
+    # e.g. "03a01Wa.wav" -> "03"
+    # basename = os.path.basename(file_path)
+    # if len(basename) < 2:
+    #     return "unknown"
+    # return basename[:2]
+
+    # AIBO: speaker ID is "{School}_{SpeakerNum}",
+    # e.g. "Mont_01_000_00.wav" -> "Mont_01"
+    basename = os.path.splitext(os.path.basename(file_path))[0]
+    parts = basename.split("_")
+    if len(parts) < 2:
         return "unknown"
-    return basename[:2]
+    return f"{parts[0]}_{parts[1]}"
 
 
 class EmoDBGenerationDataset(Dataset):
