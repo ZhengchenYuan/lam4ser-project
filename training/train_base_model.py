@@ -9,7 +9,7 @@ import torch.nn as nn
 import numpy as np
 from torch.utils.data import DataLoader, Subset
 from transformers import get_linear_schedule_with_warmup
-from sklearn.metrics import f1_score, confusion_matrix
+from sklearn.metrics import f1_score, recall_score, confusion_matrix
 from sklearn.utils.class_weight import compute_class_weight
 import matplotlib.pyplot as plt
 
@@ -29,7 +29,7 @@ def _build_config(
     if lora_rank > 0:
         tag += f"_lora{lora_rank}"
 
-    os.makedirs("checkpoints", exist_ok=True)
+    os.makedirs("checkpoints_AIBO", exist_ok=True)
 
     return {
         "encoder": encoder,
@@ -40,7 +40,7 @@ def _build_config(
         "embeddings_path": f"embeddings/aibo_{encoder}_embeddings.pt",
         "batch_size": 8,
         "lr": 1e-5,
-        "epochs": 100,
+        "epochs": 60,
         "adapter_dim": 64,
         "dropout": 0.3,
         "target_audio_len": 50,
@@ -48,8 +48,8 @@ def _build_config(
         # EMoDB: "val_speakers": ["09", "10"], "test_speakers": ["03", "08"]
         "val_speakers": ["Ohm_31", "Ohm_32"],
         "test_speakers": [f"Mont_{i:02d}" for i in range(1, 26)],
-        "checkpoint_path": f"checkpoints/{tag}_best.pt",
-        "loss_curve_path": f"checkpoints/{tag}_loss_curve.png",
+        "checkpoint_path": f"checkpoints_AIBO/{tag}_best.pt",
+        "loss_curve_path": f"checkpoints_AIBO/{tag}_loss_curve.png",
     }
 
 
@@ -131,14 +131,15 @@ def train(config):
 
     train_labels = [dataset[i]["label"].item() for i in train_idx]
 
-    class_weights = compute_class_weight(
+    class_weights = np.sqrt(compute_class_weight(
         "balanced",
         classes=np.arange(num_classes),
         y=train_labels,
-    )
+    ))
 
     criterion = nn.CrossEntropyLoss(
-        weight=torch.tensor(class_weights, dtype=torch.float).to(device)
+        weight=torch.tensor(class_weights, dtype=torch.float).to(device),
+        label_smoothing=0.1,
     )
 
     trainable_params = [p for p in model.parameters() if p.requires_grad]
@@ -181,7 +182,7 @@ def train(config):
     )
 
     train_losses, val_losses = [], []
-    best_val_loss = float("inf")
+    best_val_f1 = -1.0
 
     print("\nTraining configuration:")
     print(f"  Encoder:      {config['encoder']}")
@@ -239,6 +240,7 @@ def train(config):
 
         val_acc = sum(p == l for p, l in zip(all_preds, all_labels)) / len(all_labels)
         val_f1 = f1_score(all_labels, all_preds, average="weighted")
+        val_uar = recall_score(all_labels, all_preds, average="macro")
 
         train_losses.append(epoch_train_loss)
         val_losses.append(epoch_val_loss)
@@ -248,11 +250,12 @@ def train(config):
             f"train_loss: {epoch_train_loss:.4f} | "
             f"val_loss: {epoch_val_loss:.4f} | "
             f"val_acc: {val_acc:.4f} | "
-            f"val_f1: {val_f1:.4f}"
+            f"val_f1: {val_f1:.4f} | "
+            f"val_uar: {val_uar:.4f}"
         )
 
-        if epoch_val_loss < best_val_loss:
-            best_val_loss = epoch_val_loss
+        if val_f1 > best_val_f1:
+            best_val_f1 = val_f1
 
             torch.save(
                 {
@@ -265,6 +268,7 @@ def train(config):
                     "val_loss": epoch_val_loss,
                     "val_acc": val_acc,
                     "val_f1": val_f1,
+                    "val_uar": val_uar,
                     "idx2label": dataset.idx2label,
                     "label2idx": dataset.label2idx,
                     "config": config,
@@ -272,7 +276,7 @@ def train(config):
                 config["checkpoint_path"],
             )
 
-            print(f"  ✓ Saved best checkpoint (val_loss: {epoch_val_loss:.4f})")
+            print(f"  ✓ Saved best checkpoint (val_f1: {val_f1:.4f})")
 
     checkpoint = torch.load(
         config["checkpoint_path"],
@@ -301,6 +305,7 @@ def train(config):
 
     test_acc = sum(p == l for p, l in zip(all_preds, all_labels)) / len(all_labels)
     test_f1 = f1_score(all_labels, all_preds, average="weighted")
+    test_uar = recall_score(all_labels, all_preds, average="macro")
     cm = confusion_matrix(all_labels, all_preds)
 
     label_names = [dataset.idx2label[i] for i in range(len(dataset.idx2label))]
@@ -310,6 +315,7 @@ def train(config):
     print(f"  Prompt type:  {config['prompt_type']}")
     print(f"  Accuracy:     {test_acc:.4f}")
     print(f"  Weighted F1:  {test_f1:.4f}")
+    print(f"  UAR (macro recall): {test_uar:.4f}")
     print(f"\nConfusion matrix (rows=true, cols=pred):")
     print(f"  Labels: {label_names}")
     print(cm)
