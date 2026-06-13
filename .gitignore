@@ -16,5 +16,7 @@ embeddings/
 loss_curve.png
 dataset/
 
+.vscode/settings.json
+
 # SLURM logs
 *.out
