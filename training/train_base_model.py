@@ -38,7 +38,7 @@ def _build_config(
         "lora_rank": lora_rank,
         "lora_lr": lora_lr,
         "embeddings_path": f"embeddings/{encoder}_embeddings.pt",
-        "batch_size": 8,
+        "batch_size": 4,
         "lr": 1e-5,
         "epochs": 100,
         "adapter_dim": 64,
