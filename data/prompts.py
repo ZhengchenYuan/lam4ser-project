@@ -36,6 +36,12 @@ PROMPTS = {
         f"Possible labels are {LABEL_TEXT}."
     ),
 
+    "feature_speaker": (
+        "Classify the emotion of this speech. "
+        "Acoustic features: {features}. "
+        f"Possible labels are {LABEL_TEXT}."
+    ),
+
     "generation": (
         "Classify the emotion of this speech. "
         f"Possible labels are {LABEL_TEXT}. "
@@ -61,6 +67,7 @@ def get_prompt(prompt_type: str, features: str | None = None) -> str:
             - base
             - label_list
             - feature
+            - feature_speaker
             - generation
             - feature_generation
 
