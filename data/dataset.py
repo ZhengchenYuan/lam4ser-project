@@ -5,7 +5,12 @@ from transformers import GPT2Tokenizer
 
 from data.prompts import PROMPTS, get_prompt
 from features.acoustic_features import extract_acoustic_features
-from features.feature_prompt import acoustic_features_to_text
+from features.feature_prompt import (
+    acoustic_features_to_text,
+    acoustic_features_to_speaker_relative_text,
+    compute_speaker_feature_stats,
+    get_speaker_id_from_path,
+)
 
 
 def extract_speaker_id(file_path: str) -> str:
@@ -91,6 +96,7 @@ class EmoDBFusionDataset(Dataset):
         # embeddings/wavlm-large_acoustic_features.pt
         # ------------------------------------------------------------
         self.acoustic_feature_cache = None
+        self.speaker_feature_stats = None
 
         if self.use_feature_prompt:
             cache_path = embeddings_path.replace(
@@ -110,13 +116,29 @@ class EmoDBFusionDataset(Dataset):
 
                 for i, wav_path in enumerate(self.file_paths):
                     if i % 50 == 0:
-                        print(f"  Extracting acoustic features: {i}/{len(self.file_paths)}")
+                        print(
+                            f"  Extracting acoustic features: "
+                            f"{i}/{len(self.file_paths)}"
+                        )
 
                     feature_dict = extract_acoustic_features(wav_path)
                     self.acoustic_feature_cache.append(feature_dict)
 
                 torch.save(self.acoustic_feature_cache, cache_path)
                 print(f"Saved acoustic feature cache to: {cache_path}")
+
+        # ------------------------------------------------------------
+        # Speaker-wise feature statistics
+        #
+        # Only used for feature_speaker prompts.
+        # This is speaker-wise normalization / relative verbalization,
+        # not a mixed-effects model.
+        # ------------------------------------------------------------
+        if self.use_feature_prompt and "speaker" in self.prompt_type:
+            self.speaker_feature_stats = compute_speaker_feature_stats(
+                self.acoustic_feature_cache,
+                self.file_paths,
+            )
 
         # ------------------------------------------------------------
         # Build prompt tokens per sample.
@@ -150,14 +172,27 @@ class EmoDBFusionDataset(Dataset):
         base / label_list:
             same prompt for all samples.
 
-        feature / feature_generation:
+        feature:
             acoustic features are loaded or extracted,
             converted into text,
             and inserted into the prompt.
+
+        feature_speaker:
+            pitch / energy are described relative to each speaker baseline.
         """
         if self.use_feature_prompt:
             features = self.acoustic_feature_cache[idx]
-            feature_text = acoustic_features_to_text(features)
+
+            if self.prompt_type == "feature_speaker":
+                speaker_id = get_speaker_id_from_path(self.file_paths[idx])
+                feature_text = acoustic_features_to_speaker_relative_text(
+                    features,
+                    speaker_id,
+                    self.speaker_feature_stats,
+                )
+            else:
+                feature_text = acoustic_features_to_text(features)
+
             return get_prompt(self.prompt_type, features=feature_text)
 
         return get_prompt(self.prompt_type)
@@ -185,6 +220,7 @@ def speaker_independent_split(dataset, val_speakers=None, test_speakers=None):
         indices = torch.randperm(n).tolist()
         train_end = int(0.70 * n)
         val_end = train_end + int(0.15 * n)
+
         train_indices = indices[:train_end]
         val_indices = indices[train_end:val_end]
         test_indices = indices[val_end:]
@@ -201,6 +237,7 @@ def speaker_independent_split(dataset, val_speakers=None, test_speakers=None):
 
     test_speakers = set(test_speakers)
     val_speakers = set(val_speakers)
+
     train_indices, val_indices, test_indices = [], [], []
 
     for i, spk in enumerate(dataset.speaker_ids):
