@@ -391,8 +391,7 @@ if __name__ == "__main__":
             "base",
             "label_list",
             "feature",
-            "generation",
-            "feature_generation",
+            "feature_speaker",
         ],
         help="Prompt template to use.",
     )

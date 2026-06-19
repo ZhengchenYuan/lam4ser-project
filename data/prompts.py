@@ -46,6 +46,12 @@ PROMPTS = {
         "Possible labels are {label_text}."
     ),
 
+    "feature_speaker": (
+        "Classify the emotion of this speech. "
+        "Acoustic features: {features}. "
+        f"Possible labels are {LABEL_TEXT}."
+    ),
+
     "generation": (
         "Classify the emotion of this speech. "
         "Possible labels are {label_text}. "
