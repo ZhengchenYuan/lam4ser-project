@@ -14,10 +14,15 @@ from features.feature_prompt import (
 
 
 def extract_speaker_id(file_path: str) -> str:
-    basename = os.path.basename(file_path)
-    if len(basename) < 2:
+    basename = os.path.splitext(os.path.basename(file_path))[0]
+    if basename and basename[0].isdigit():
+        # EMoDB: "03a01Wa" -> "03"
+        return basename[:2]
+    # AIBO: "Mont_01_000_00" -> "Mont_01"
+    parts = basename.split("_")
+    if len(parts) < 2:
         return "unknown"
-    return basename[:2]
+    return f"{parts[0]}_{parts[1]}"
 
 
 class EmoDBFusionDataset(Dataset):
@@ -150,6 +155,7 @@ class EmoDBFusionDataset(Dataset):
         #   self.input_ids_list[idx] can be different for each sample,
         #   especially for acoustic feature prompts.
         # ------------------------------------------------------------
+        self.label_names = [self.idx2label[i] for i in range(len(self.idx2label))]
         self.input_ids_list = []
 
         for idx in range(len(self.embeddings)):
@@ -193,9 +199,9 @@ class EmoDBFusionDataset(Dataset):
             else:
                 feature_text = acoustic_features_to_text(features)
 
-            return get_prompt(self.prompt_type, features=feature_text)
+            return get_prompt(self.prompt_type, features=feature_text, labels=self.label_names)
 
-        return get_prompt(self.prompt_type)
+        return get_prompt(self.prompt_type, labels=self.label_names)
 
     def __len__(self):
         return len(self.embeddings)
@@ -209,12 +215,7 @@ class EmoDBFusionDataset(Dataset):
 
 
 def speaker_independent_split(dataset, val_speakers=None, test_speakers=None):
-    if test_speakers is None:
-        test_speakers = ["03", "08"]
-    if val_speakers is None:
-        val_speakers = ["09", "10"]
-
-    if dataset.speaker_ids is None:
+    if dataset.speaker_ids is None or (val_speakers is None and test_speakers is None):
         torch.manual_seed(42)
         n = len(dataset)
         indices = torch.randperm(n).tolist()
