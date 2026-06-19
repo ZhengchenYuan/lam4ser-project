@@ -18,26 +18,48 @@ from models.compression.compressor import AudioCompressor
 from models.audio_gpt2 import AudioGPT2
 
 
+DATASET_CONFIGS = {
+    "emodb": {
+        "embeddings_prefix": "",
+        "checkpoint_dir": "checkpoints",
+        "num_classes_hint": 7,
+        "val_speakers": ["09", "10"],
+        "test_speakers": ["03", "08"],
+    },
+    "aibo": {
+        "embeddings_prefix": "aibo_",
+        "checkpoint_dir": "checkpoints_AIBO",
+        "num_classes_hint": 5,
+        "val_speakers": ["Ohm_31", "Ohm_32"],
+        "test_speakers": [f"Mont_{i:02d}" for i in range(1, 26)],
+    },
+}
+
+
 def _build_config(
     encoder: str,
+    dataset: str = "aibo",
     lora_rank: int = 0,
     lora_lr: float = 1e-4,
     prompt_type: str = "base",
 ) -> dict:
+    ds = DATASET_CONFIGS[dataset]
     tag = f"{encoder}_{prompt_type}"
 
     if lora_rank > 0:
         tag += f"_lora{lora_rank}"
 
-    os.makedirs("checkpoints_AIBO", exist_ok=True)
+    checkpoint_dir = ds["checkpoint_dir"]
+    os.makedirs(checkpoint_dir, exist_ok=True)
 
     return {
+        "dataset": dataset,
         "encoder": encoder,
         "prompt_type": prompt_type,
         "max_prompt_length": 64 if "feature" in prompt_type else 32,
         "lora_rank": lora_rank,
         "lora_lr": lora_lr,
-        "embeddings_path": f"embeddings/aibo_{encoder}_embeddings.pt",
+        "embeddings_path": f"embeddings/{ds['embeddings_prefix']}{encoder}_embeddings.pt",
         "batch_size": 8,
         "lr": 1e-5,
         "epochs": 60,
@@ -45,24 +67,24 @@ def _build_config(
         "dropout": 0.3,
         "target_audio_len": 50,
         "device": "cuda" if torch.cuda.is_available() else "cpu",
-        # EMoDB: "val_speakers": ["09", "10"], "test_speakers": ["03", "08"]
-        "val_speakers": ["Ohm_31", "Ohm_32"],
-        "test_speakers": [f"Mont_{i:02d}" for i in range(1, 26)],
-        "checkpoint_path": f"checkpoints_AIBO/{tag}_best.pt",
-        "loss_curve_path": f"checkpoints_AIBO/{tag}_loss_curve.png",
+        "val_speakers": ds["val_speakers"],
+        "test_speakers": ds["test_speakers"],
+        "num_classes_hint": ds["num_classes_hint"],
+        "checkpoint_path": f"{checkpoint_dir}/{tag}_best.pt",
+        "loss_curve_path": f"{checkpoint_dir}/{tag}_loss_curve.png",
     }
 
 
 def smoke_test(config):
     audio_dim = 768
     prompt_len = config["max_prompt_length"]
+    num_classes = config["num_classes_hint"]
 
     input_ids = torch.randint(0, 50256, (2, prompt_len))
     audio = torch.randn(2, 50, audio_dim)
 
-    # AIBO: 5 emotion classes (EMoDB used 7)
     model = AudioGPT2(
-        num_classes=5,
+        num_classes=num_classes,
         audio_dim=audio_dim,
         adapter_dim=config["adapter_dim"],
         dropout=config["dropout"],
@@ -71,16 +93,17 @@ def smoke_test(config):
 
     logits = model(input_ids, audio)
 
-    assert logits.shape == (2, 5), f"Expected logits shape (2, 5), got {logits.shape}"
+    assert logits.shape == (2, num_classes), f"Expected logits shape (2, {num_classes}), got {logits.shape}"
 
     print("✓ Smoke test passed")
 
 
 def train(config):
     if not os.path.exists(config["embeddings_path"]):
+        preprocessing_script = f"models/audio_encoder/preprocessing_{config['dataset']}.py"
         print(
             f"ERROR: '{config['embeddings_path']}' not found. "
-            "Run models/audio_encoder/preprocessing_aibo.py first to generate the embeddings file."
+            f"Run {preprocessing_script} first to generate the embeddings file."
         )
         sys.exit(1)
 
@@ -185,6 +208,7 @@ def train(config):
     best_val_f1 = -1.0
 
     print("\nTraining configuration:")
+    print(f"  Dataset:      {config['dataset']}")
     print(f"  Encoder:      {config['encoder']}")
     print(f"  Prompt type:  {config['prompt_type']}")
     print(f"  Prompt length:{config['max_prompt_length']}")
@@ -260,6 +284,7 @@ def train(config):
             torch.save(
                 {
                     "epoch": epoch,
+                    "dataset": config["dataset"],
                     "encoder": config["encoder"],
                     "prompt_type": config["prompt_type"],
                     "max_prompt_length": config["max_prompt_length"],
@@ -311,6 +336,7 @@ def train(config):
     label_names = [dataset.idx2label[i] for i in range(len(dataset.idx2label))]
 
     print(f"\nTest results (best checkpoint, epoch {checkpoint['epoch']}):")
+    print(f"  Dataset:      {config['dataset']}")
     print(f"  Encoder:      {config['encoder']}")
     print(f"  Prompt type:  {config['prompt_type']}")
     print(f"  Accuracy:     {test_acc:.4f}")
@@ -327,7 +353,7 @@ def train(config):
     plt.ylabel("Loss")
     plt.title(
         f"Training and validation loss "
-        f"({config['encoder']}, {config['prompt_type']})"
+        f"({config['dataset']}, {config['encoder']}, {config['prompt_type']})"
     )
     plt.legend()
     plt.savefig(config["loss_curve_path"])
@@ -338,6 +364,13 @@ def train(config):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--dataset",
+        default="aibo",
+        choices=list(DATASET_CONFIGS),
+        help="Which dataset to train on.",
+    )
 
     parser.add_argument(
         "--encoder",
@@ -382,6 +415,7 @@ if __name__ == "__main__":
 
     config = _build_config(
         args.encoder,
+        dataset=args.dataset,
         lora_rank=args.lora_rank,
         lora_lr=args.lora_lr,
         prompt_type=args.prompt_type,

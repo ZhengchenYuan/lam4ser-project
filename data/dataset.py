@@ -9,16 +9,11 @@ from features.feature_prompt import acoustic_features_to_text
 
 
 def extract_speaker_id(file_path: str) -> str:
-    # EMoDB: speaker ID is the first two characters of the filename,
-    # e.g. "03a01Wa.wav" -> "03"
-    # basename = os.path.basename(file_path)
-    # if len(basename) < 2:
-    #     return "unknown"
-    # return basename[:2]
-
-    # AIBO: speaker ID is "{School}_{SpeakerNum}",
-    # e.g. "Mont_01_000_00.wav" -> "Mont_01"
     basename = os.path.splitext(os.path.basename(file_path))[0]
+    if basename and basename[0].isdigit():
+        # EMoDB: "03a01Wa" -> "03"
+        return basename[:2]
+    # AIBO: "Mont_01_000_00" -> "Mont_01"
     parts = basename.split("_")
     if len(parts) < 2:
         return "unknown"
@@ -138,6 +133,7 @@ class EmoDBFusionDataset(Dataset):
         #   self.input_ids_list[idx] can be different for each sample,
         #   especially for acoustic feature prompts.
         # ------------------------------------------------------------
+        self.label_names = [self.idx2label[i] for i in range(len(self.idx2label))]
         self.input_ids_list = []
 
         for idx in range(len(self.embeddings)):
@@ -168,9 +164,9 @@ class EmoDBFusionDataset(Dataset):
         if self.use_feature_prompt:
             features = self.acoustic_feature_cache[idx]
             feature_text = acoustic_features_to_text(features)
-            return get_prompt(self.prompt_type, features=feature_text)
+            return get_prompt(self.prompt_type, features=feature_text, labels=self.label_names)
 
-        return get_prompt(self.prompt_type)
+        return get_prompt(self.prompt_type, labels=self.label_names)
 
     def __len__(self):
         return len(self.embeddings)
@@ -184,21 +180,7 @@ class EmoDBFusionDataset(Dataset):
 
 
 def speaker_independent_split(dataset, val_speakers=None, test_speakers=None):
-    # EMoDB defaults:
-    # if test_speakers is None:
-    #     test_speakers = ["03", "08"]
-    # if val_speakers is None:
-    #     val_speakers = ["09", "10"]
-
-    # AIBO defaults: school-based split (IS2009 convention) -- train/val on the
-    # Ohm school, test on the Mont school -- with two Ohm speakers held out for
-    # validation (Ohm_31, Ohm_32; ~890 samples, all 5 classes represented).
-    if test_speakers is None:
-        test_speakers = [f"Mont_{i:02d}" for i in range(1, 26)]
-    if val_speakers is None:
-        val_speakers = ["Ohm_31", "Ohm_32"]
-
-    if dataset.speaker_ids is None:
+    if dataset.speaker_ids is None or (val_speakers is None and test_speakers is None):
         torch.manual_seed(42)
         n = len(dataset)
         indices = torch.randperm(n).tolist()

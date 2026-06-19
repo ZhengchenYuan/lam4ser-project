@@ -1,9 +1,12 @@
 """
-SVM baseline for AIBO emotion recognition (IS2009 Emotion Challenge, 5-class).
+SVM baseline for speech emotion recognition.
 
 Features: 40 MFCCs (mean + std), F0 (mean + std of voiced frames), RMS energy (mean + std).
 Uses the same speaker-independent split as the main model.
+
+Supports both EMoDB and AIBO via --dataset.
 """
+import argparse
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -18,42 +21,58 @@ from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, classifi
 from data.dataset import extract_speaker_id
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# EMoDB: WAV_DIR = os.path.join(PROJECT_ROOT, "audb", "emodb", "2.0.0", "fe182b91", "wav")
-WAV_DIR = os.path.join(PROJECT_ROOT, "dataset", "wav")
-LABELS_FILE = os.path.join(
-    PROJECT_ROOT, "dataset", "labels", "IS2009EmotionChallenge", "chunk_labels_5cl_corpus.txt"
-)
 
-# EMoDB: VAL_SPEAKERS = {"09", "10"}, TEST_SPEAKERS = {"03", "08"}
-VAL_SPEAKERS  = {"Ohm_31", "Ohm_32"}
-TEST_SPEAKERS = {f"Mont_{i:02d}" for i in range(1, 26)}
-N_MFCC        = 40
 SAMPLING_RATE = 16000
+N_MFCC = 40
 
-# EMoDB:
-# _EMOTION_CODES = {
-#     "W": "anger", "L": "boredom", "E": "disgust", "A": "fear",
-#     "F": "happiness", "N": "neutral", "T": "sadness",
-# }
-
-# AIBO (IS2009 5-class codes):
-AIBO_LABEL_MAP = {
-    "A": "anger", "E": "emphatic", "N": "neutral", "P": "positive", "R": "rest",
+DATASET_CONFIGS = {
+    "emodb": {
+        "val_speakers": {"09", "10"},
+        "test_speakers": {"03", "08"},
+    },
+    "aibo": {
+        "wav_dir": os.path.join(PROJECT_ROOT, "dataset", "wav"),
+        "labels_file": os.path.join(
+            PROJECT_ROOT, "dataset", "labels", "IS2009EmotionChallenge", "chunk_labels_5cl_corpus.txt"
+        ),
+        "label_map": {
+            "A": "anger", "E": "emphatic", "N": "neutral", "P": "positive", "R": "rest",
+        },
+        "val_speakers": {"Ohm_31", "Ohm_32"},
+        "test_speakers": {f"Mont_{i:02d}" for i in range(1, 26)},
+    },
 }
 
 
-def _load_label_index():
-    """Read the IS2009 5-class label file -> list of (wav_path, emotion, speaker_id)."""
+def _load_emodb_index():
+    """Load EMoDB via audb; returns list of (wav_path, emotion, speaker_id)."""
+    import audb
+    db = audb.load("emodb", version="2.0.0", sampling_rate=SAMPLING_RATE, mixdown=True, format="wav")
+    df = db["emotion"].get()
     index = []
-    with open(LABELS_FILE) as f:
+    for file_path, row in df.iterrows():
+        if isinstance(file_path, tuple):
+            file_path = file_path[0]
+        index.append((file_path, row["emotion"], extract_speaker_id(file_path)))
+    return index
+
+
+def _load_aibo_index(cfg):
+    """Load AIBO from local label file; returns list of (wav_path, emotion, speaker_id)."""
+    labels_file = cfg["labels_file"]
+    if not os.path.exists(labels_file):
+        raise FileNotFoundError(f"AIBO label file not found: {labels_file}")
+
+    label_map = cfg["label_map"]
+    index = []
+    with open(labels_file) as f:
         for line in f:
             parts = line.split()
             if not parts:
                 continue
             chunk_name, code = parts[0], parts[1]
-            wav_path = os.path.join(WAV_DIR, f"{chunk_name}.wav")
-            emotion = AIBO_LABEL_MAP[code]
-            index.append((wav_path, emotion, extract_speaker_id(wav_path)))
+            wav_path = os.path.join(cfg["wav_dir"], f"{chunk_name}.wav")
+            index.append((wav_path, label_map[code], extract_speaker_id(wav_path)))
     return index
 
 
@@ -78,17 +97,25 @@ def _extract_features(path):
     return np.concatenate([mfcc_feat, pitch_feat, energy_feat])
 
 
-def run():
-    if not os.path.isdir(WAV_DIR):
-        print(f"ERROR: wav directory not found at {WAV_DIR}")
-        sys.exit(1)
+def run(dataset: str = "aibo"):
+    cfg = DATASET_CONFIGS[dataset]
 
-    index = _load_label_index()
-    print(f"Found {len(index)} labeled samples, extracting features...")
+    if dataset == "emodb":
+        index = _load_emodb_index()
+    else:
+        if not os.path.isdir(cfg["wav_dir"]):
+            print(f"ERROR: wav directory not found at {cfg['wav_dir']}")
+            sys.exit(1)
+        index = _load_aibo_index(cfg)
 
-    emotion_classes = sorted(set(AIBO_LABEL_MAP.values()))
+    print(f"Dataset: {dataset} — {len(index)} labeled samples, extracting features...")
+
+    emotion_classes = sorted(set(e for _, e, _ in index))
     label2idx = {e: i for i, e in enumerate(emotion_classes)}
-    idx2label  = {i: e for e, i in label2idx.items()}
+    idx2label = {i: e for e, i in label2idx.items()}
+
+    val_speakers = cfg["val_speakers"]
+    test_speakers = cfg["test_speakers"]
 
     features, labels, speaker_ids = [], [], []
     for i, (path, emotion, speaker_id) in enumerate(index):
@@ -100,13 +127,13 @@ def run():
             print(f"  {i + 1}/{len(index)}")
 
     features = np.array(features)
-    labels   = np.array(labels)
+    labels = np.array(labels)
 
     train_idx, val_idx, test_idx = [], [], []
     for i, spk in enumerate(speaker_ids):
-        if spk in TEST_SPEAKERS:
+        if spk in test_speakers:
             test_idx.append(i)
-        elif spk in VAL_SPEAKERS:
+        elif spk in val_speakers:
             val_idx.append(i)
         else:
             train_idx.append(i)
@@ -147,4 +174,12 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--dataset",
+        default="aibo",
+        choices=list(DATASET_CONFIGS),
+        help="Which dataset to run the SVM baseline on.",
+    )
+    args = parser.parse_args()
+    run(args.dataset)
