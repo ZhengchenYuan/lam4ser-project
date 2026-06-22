@@ -2,9 +2,9 @@ import os
 from collections import defaultdict
 import torch
 from torch.utils.data import Dataset
-from transformers import GPT2Tokenizer
 
 from data.prompts import get_prompt
+from data.tokenizer_utils import build_generation_tokenizer
 from features.acoustic_features import extract_acoustic_features
 from features.feature_prompt import (
     acoustic_features_to_global_caption,
@@ -18,9 +18,14 @@ from features.feature_prompt import (
 GENERATION_PROMPT_TYPES = (
     "generation",
     "feature_generation",
+    "answer_generation",
     "reasoning_generation_global",
     "speaker_reasoning_generation",
     "speaker_reasoning_generation_answer_first",
+)
+
+ANSWER_TAG_PROMPT_TYPES = (
+    "answer_generation",
 )
 
 REASONING_PROMPT_TYPES = (
@@ -70,6 +75,7 @@ class EmoDBGenerationDataset(Dataset):
         self.prompt_type = prompt_type
         self.max_length = max_length
         self.use_feature_prompt = "feature" in prompt_type
+        self.use_answer_tag_target = prompt_type in ANSWER_TAG_PROMPT_TYPES
         self.use_reasoning_target = prompt_type in REASONING_PROMPT_TYPES
         self.use_speaker_reasoning = prompt_type in SPEAKER_REASONING_PROMPT_TYPES
 
@@ -112,8 +118,7 @@ class EmoDBGenerationDataset(Dataset):
                 "embeddings file."
             )
 
-        self.tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
-        self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer = build_generation_tokenizer(verbose=True)
 
         self.acoustic_feature_cache = None
         self.speaker_baselines = {}
@@ -254,6 +259,8 @@ class EmoDBGenerationDataset(Dataset):
 
     def _build_target_for_sample(self, real_idx: int, label_text: str) -> str:
         if not self.use_reasoning_target:
+            if self.use_answer_tag_target:
+                return f"<answer>{label_text}</answer>"
             return " " + label_text
 
         features = self.acoustic_feature_cache[real_idx]
@@ -277,6 +284,10 @@ class EmoDBGenerationDataset(Dataset):
             return f"<answer>{label_text}</answer><think>{caption} {reasoning}</think>"
 
         return f"<think>{caption} {reasoning}</think><answer>{label_text}</answer>"
+
+    def build_target_for_sample(self, idx: int, label_text: str) -> str:
+        real_idx = self.sample_indices[idx]
+        return self._build_target_for_sample(real_idx, label_text)
 
     def _build_generation_sample(self, idx: int):
         real_idx = self.sample_indices[idx]

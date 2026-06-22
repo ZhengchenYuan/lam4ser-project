@@ -11,6 +11,7 @@ from transformers import get_linear_schedule_with_warmup
 
 from data.generation_dataset import EmoDBGenerationDataset
 from data.dataset import speaker_independent_split
+from data.tokenizer_utils import build_generation_tokenizer
 from models.compression.compressor import AudioCompressor
 from models.audio_gpt2_generation import AudioGPT2Generation
 
@@ -18,6 +19,7 @@ from models.audio_gpt2_generation import AudioGPT2Generation
 GENERATION_PROMPT_TYPES = [
     "generation",
     "feature_generation",
+    "answer_generation",
     "reasoning_generation_global",
     "speaker_reasoning_generation",
     "speaker_reasoning_generation_answer_first",
@@ -69,8 +71,9 @@ def _build_config(
 def smoke_test(config):
     audio_dim = 768
     prompt_len = config["max_prompt_length"]
+    tokenizer = build_generation_tokenizer(verbose=True)
 
-    input_ids = torch.randint(0, 50256, (2, prompt_len))
+    input_ids = torch.randint(0, len(tokenizer), (2, prompt_len))
     audio = torch.randn(2, 50, audio_dim)
 
     model = AudioGPT2Generation(
@@ -79,12 +82,15 @@ def smoke_test(config):
         dropout=config["dropout"],
         lora_rank=config["lora_rank"],
     )
+    model.configure_tokenizer_vocab(len(tokenizer))
 
     logits = model(input_ids, audio)
 
     assert logits.shape[0] == 2, f"Expected batch size 2, got {logits.shape[0]}"
     assert logits.shape[1] == prompt_len, f"Expected seq len {prompt_len}, got {logits.shape[1]}"
-    assert logits.shape[2] == 50257, f"Expected GPT-2 vocab size 50257, got {logits.shape[2]}"
+    assert logits.shape[2] == len(tokenizer), (
+        f"Expected tokenizer vocab size {len(tokenizer)}, got {logits.shape[2]}"
+    )
 
     print("✓ Generation smoke test passed")
 
@@ -139,6 +145,7 @@ def train(config):
         dropout=config["dropout"],
         lora_rank=config["lora_rank"],
     ).to(device)
+    model.configure_tokenizer_vocab(len(dataset.tokenizer))
 
     criterion = nn.CrossEntropyLoss(ignore_index=-100)
 
@@ -205,10 +212,7 @@ def train(config):
 
             logits = model(input_ids, audio_compressed)
 
-            loss = criterion(
-                logits.view(-1, logits.size(-1)),
-                labels.view(-1),
-            )
+            loss = language_model_loss(logits, labels, criterion)
 
             optimizer.zero_grad()
             loss.backward()
@@ -233,10 +237,7 @@ def train(config):
 
                 logits = model(input_ids, audio_compressed)
 
-                loss = criterion(
-                    logits.view(-1, logits.size(-1)),
-                    labels.view(-1),
-                )
+                loss = language_model_loss(logits, labels, criterion)
 
                 epoch_val_loss += loss.item()
 
@@ -303,14 +304,28 @@ def evaluate_loss(model, compressor, loader, criterion, device):
 
             logits = model(input_ids, audio_compressed)
 
-            loss = criterion(
-                logits.view(-1, logits.size(-1)),
-                labels.view(-1),
-            )
+            loss = language_model_loss(logits, labels, criterion)
 
             total_loss += loss.item()
 
     return total_loss / len(loader)
+
+
+def language_model_loss(logits, labels, criterion):
+    """
+    Decoder-only LM loss: token t predicts token t+1.
+
+    The dataset masks prompt positions with -100. After shifting, the first
+    target token is predicted from the final prompt position, which is the
+    behavior needed for generation.
+    """
+    shift_logits = logits[:, :-1, :].contiguous()
+    shift_labels = labels[:, 1:].contiguous()
+
+    return criterion(
+        shift_logits.view(-1, shift_logits.size(-1)),
+        shift_labels.view(-1),
+    )
 
 
 if __name__ == "__main__":

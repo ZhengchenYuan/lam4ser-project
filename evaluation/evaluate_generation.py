@@ -8,13 +8,14 @@ from collections import Counter
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
-from transformers import GPT2Tokenizer
 from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix
 
 from data.generation_dataset import EmoDBGenerationDataset
 from data.dataset import speaker_independent_split
 from data.prompts import LABELS
+from data.tokenizer_utils import build_generation_tokenizer
 from models.compression.compressor import AudioCompressor
 from models.audio_gpt2_generation import AudioGPT2Generation
 
@@ -22,6 +23,7 @@ from models.audio_gpt2_generation import AudioGPT2Generation
 GENERATION_PROMPT_TYPES = [
     "generation",
     "feature_generation",
+    "answer_generation",
     "reasoning_generation_global",
     "speaker_reasoning_generation",
     "speaker_reasoning_generation_answer_first",
@@ -31,6 +33,10 @@ REASONING_PROMPT_TYPES = {
     "reasoning_generation_global",
     "speaker_reasoning_generation",
     "speaker_reasoning_generation_answer_first",
+}
+
+ANSWER_TAG_PROMPT_TYPES = REASONING_PROMPT_TYPES | {
+    "answer_generation",
 }
 
 
@@ -52,6 +58,7 @@ def _build_config(
     encoder: str,
     prompt_type: str,
     checkpoint_path: str | None = None,
+    candidate_scoring: str = "none",
 ) -> dict:
     tag = f"{encoder}_{prompt_type}_generation"
 
@@ -69,6 +76,7 @@ def _build_config(
         "test_speakers": ["03", "08"],
         "checkpoint_path": checkpoint_path or f"checkpoints/{tag}_best.pt",
         "max_new_tokens": _max_new_tokens_for_prompt_type(prompt_type),
+        "candidate_scoring": candidate_scoring,
     }
 
 
@@ -104,13 +112,16 @@ def extract_reasoning_blocks(text: str) -> tuple[str, str, bool]:
 def parse_generated_label(text: str, prompt_type: str) -> tuple[str | None, str, str, bool]:
     think_text, answer_text, format_valid = extract_reasoning_blocks(text)
 
-    if prompt_type in REASONING_PROMPT_TYPES and answer_text:
+    if prompt_type in ANSWER_TAG_PROMPT_TYPES and answer_text:
         pred_label = normalize_generated_label(answer_text)
     else:
         pred_label = normalize_generated_label(text)
 
     if pred_label is None and answer_text:
         pred_label = normalize_generated_label(answer_text)
+
+    if prompt_type == "answer_generation":
+        format_valid = bool(answer_text)
 
     return pred_label, think_text, answer_text, format_valid
 
@@ -128,6 +139,183 @@ def build_prompt_for_eval(dataset, idx: int) -> str:
     and let the model generate the answer.
     """
     return dataset._build_prompt_for_sample(idx)
+
+
+def language_model_loss_per_candidate(logits, labels):
+    shift_logits = logits[:, :-1, :].contiguous()
+    shift_labels = labels[:, 1:].contiguous()
+
+    loss = nn.functional.cross_entropy(
+        shift_logits.view(-1, shift_logits.size(-1)),
+        shift_labels.view(-1),
+        ignore_index=-100,
+        reduction="none",
+    )
+    loss = loss.view(shift_labels.shape)
+    token_mask = shift_labels.ne(-100)
+
+    return loss.sum().item(), token_mask.sum().item()
+
+
+def load_generation_state_dict(model, state_dict):
+    current_state = model.state_dict()
+    compatible_state = {}
+    skipped = []
+
+    for key, value in state_dict.items():
+        if key in current_state and current_state[key].shape == value.shape:
+            compatible_state[key] = value
+        else:
+            current_shape = current_state[key].shape if key in current_state else None
+            skipped.append((key, tuple(value.shape), current_shape))
+
+    missing, unexpected = model.load_state_dict(compatible_state, strict=False)
+
+    if skipped:
+        print("Skipped checkpoint tensors with incompatible shapes:")
+        for key, old_shape, new_shape in skipped:
+            print(f"  {key}: checkpoint {old_shape}, model {new_shape}")
+
+    if missing:
+        print(f"Missing tensors after compatible load: {len(missing)}")
+    if unexpected:
+        print(f"Unexpected tensors after compatible load: {unexpected}")
+
+
+def build_candidate_target(dataset, idx: int, label: str, mode: str) -> str:
+    if mode == "answer":
+        if dataset.prompt_type in ANSWER_TAG_PROMPT_TYPES:
+            return f"<answer>{label}</answer>"
+        return " " + label
+
+    if mode == "full_target":
+        return dataset.build_target_for_sample(idx, label)
+
+    raise ValueError(f"Unknown candidate scoring mode: {mode}")
+
+
+@torch.no_grad()
+def evaluate_candidate_scoring(
+    model,
+    tokenizer,
+    compressor,
+    dataset,
+    test_idx,
+    loader,
+    config,
+    mode: str,
+):
+    y_true = []
+    y_pred = []
+
+    for local_batch_idx, batch in enumerate(loader):
+        original_idx = test_idx[local_batch_idx]
+        prompt = build_prompt_for_eval(dataset, original_idx)
+        audio = batch["audio"].to(config["device"])
+        audio_compressed = compressor(audio)
+        class_label = batch["class_label"].item()
+
+        best_label = None
+        best_score = float("inf")
+
+        prompt_encoded = tokenizer(
+            prompt,
+            truncation=True,
+            max_length=config["max_prompt_length"],
+            return_tensors="pt",
+        )
+        prompt_len = prompt_encoded["input_ids"].shape[1]
+
+        for label in LABELS:
+            target = build_candidate_target(dataset, original_idx, label, mode)
+            full_text = prompt + target
+
+            encoded = tokenizer(
+                full_text,
+                max_length=config["max_prompt_length"],
+                padding="max_length",
+                truncation=True,
+                return_tensors="pt",
+            )
+
+            input_ids = encoded["input_ids"].to(config["device"])
+            lm_labels = input_ids.clone()
+            lm_labels[:, :prompt_len] = -100
+            lm_labels[input_ids == tokenizer.pad_token_id] = -100
+
+            logits = model(input_ids, audio_compressed)
+            loss_sum, token_count = language_model_loss_per_candidate(
+                logits,
+                lm_labels,
+            )
+            score = loss_sum / max(token_count, 1)
+
+            if score < best_score:
+                best_score = score
+                best_label = label
+
+        y_true.append(dataset.idx2label[int(class_label)])
+        y_pred.append(best_label or "invalid")
+
+    print()
+    print(f"Candidate-scoring results ({mode}):")
+    _print_classification_metrics(y_true, y_pred)
+
+
+def _print_classification_metrics(y_true, y_pred):
+    all_eval_labels = LABELS + ["invalid"]
+
+    acc = accuracy_score(y_true, y_pred)
+    weighted_f1 = f1_score(
+        y_true,
+        y_pred,
+        labels=all_eval_labels,
+        average="weighted",
+        zero_division=0,
+    )
+    invalid_count = sum(1 for pred in y_pred if pred == "invalid")
+    validity = 1.0 - invalid_count / max(len(y_pred), 1)
+
+    print(f"  Accuracy:                 {acc:.4f}")
+    print(f"  Weighted F1:              {weighted_f1:.4f}")
+    print(f"  Generated label validity: {validity:.4f}")
+    print()
+
+    per_class_f1 = f1_score(
+        y_true,
+        y_pred,
+        labels=LABELS,
+        average=None,
+        zero_division=0,
+    )
+    print("Per-class F1:")
+    for label, score in zip(LABELS, per_class_f1):
+        print(f"  {label}: {score:.4f}")
+    print()
+
+    print("Classification report:")
+    print(
+        classification_report(
+            y_true,
+            y_pred,
+            labels=all_eval_labels,
+            zero_division=0,
+        )
+    )
+
+    print("Confusion matrix:")
+    print(f"Labels: {all_eval_labels}")
+    print(
+        confusion_matrix(
+            y_true,
+            y_pred,
+            labels=all_eval_labels,
+        )
+    )
+
+    print()
+    print("Prediction distribution:")
+    print(Counter(y_pred))
 
 
 @torch.no_grad()
@@ -209,8 +397,7 @@ def evaluate(config):
         shuffle=False,
     )
 
-    tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
-    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer = build_generation_tokenizer(verbose=True)
 
     audio_dim = dataset.embeddings[0].shape[-1]
 
@@ -220,8 +407,9 @@ def evaluate(config):
         dropout=dropout,
         lora_rank=lora_rank,
     ).to(device)
+    model.configure_tokenizer_vocab(len(tokenizer))
 
-    model.load_state_dict(checkpoint["model_state_dict"])
+    load_generation_state_dict(model, checkpoint["model_state_dict"])
     model.eval()
 
     compressor = AudioCompressor(target_len=config["target_audio_len"]).to(device)
@@ -238,6 +426,7 @@ def evaluate(config):
     print(f"  Prompt type: {config['prompt_type']}")
     print(f"  Device:      {device}")
     print(f"  Checkpoint:  {config['checkpoint_path']}")
+    print(f"  Candidate scoring: {config['candidate_scoring']}")
     print()
 
     for local_batch_idx, batch in enumerate(loader):
@@ -269,7 +458,7 @@ def evaluate(config):
 
         full_text = tokenizer.decode(
             generated_ids[0],
-            skip_special_tokens=True,
+            skip_special_tokens=False,
         )
 
         if full_text.startswith(prompt):
@@ -303,63 +492,12 @@ def evaluate(config):
             "answer_text": extracted_answer_text,
         })
 
-    all_eval_labels = LABELS + ["invalid"]
-
-    acc = accuracy_score(y_true, y_pred)
-    weighted_f1 = f1_score(
-        y_true,
-        y_pred,
-        labels=all_eval_labels,
-        average="weighted",
-        zero_division=0,
-    )
-
     invalid_count = sum(1 for pred in y_pred if pred == "invalid")
-    validity = 1.0 - invalid_count / max(len(y_pred), 1)
     format_validity = sum(format_valid_flags) / max(len(format_valid_flags), 1)
 
-    print("Generation test results:")
-    print(f"  Accuracy:                 {acc:.4f}")
-    print(f"  Weighted F1:              {weighted_f1:.4f}")
-    print(f"  Generated label validity: {validity:.4f}")
+    print("Free-generation results:")
+    _print_classification_metrics(y_true, y_pred)
     print(f"  Format validity:          {format_validity:.4f}")
-    print()
-
-    per_class_f1 = f1_score(
-        y_true,
-        y_pred,
-        labels=LABELS,
-        average=None,
-        zero_division=0,
-    )
-    print("Per-class F1:")
-    for label, score in zip(LABELS, per_class_f1):
-        print(f"  {label}: {score:.4f}")
-    print()
-
-    print("Classification report:")
-    print(
-        classification_report(
-            y_true,
-            y_pred,
-            labels=all_eval_labels,
-            zero_division=0,
-        )
-    )
-
-    print("Confusion matrix:")
-    print(f"Labels: {all_eval_labels}")
-    print(
-        confusion_matrix(
-            y_true,
-            y_pred,
-            labels=all_eval_labels,
-        )
-    )
-
-    print()
-    print("Prediction distribution:")
-    print(Counter(y_pred))
 
     print()
     print("Example generations:")
@@ -392,6 +530,30 @@ def evaluate(config):
     print()
     print(f"Saved generated output samples to: {sample_path}")
 
+    if config["candidate_scoring"] in ("answer", "both"):
+        evaluate_candidate_scoring(
+            model=model,
+            tokenizer=tokenizer,
+            compressor=compressor,
+            dataset=dataset,
+            test_idx=test_idx,
+            loader=loader,
+            config=config,
+            mode="answer",
+        )
+
+    if config["candidate_scoring"] in ("full_target", "both"):
+        evaluate_candidate_scoring(
+            model=model,
+            tokenizer=tokenizer,
+            compressor=compressor,
+            dataset=dataset,
+            test_idx=test_idx,
+            loader=loader,
+            config=config,
+            mode="full_target",
+        )
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -421,12 +583,20 @@ if __name__ == "__main__":
         help="Optional path to generation checkpoint. If not set, uses the default checkpoint name.",
     )
 
+    parser.add_argument(
+        "--candidate_scoring",
+        default="none",
+        choices=["none", "answer", "full_target", "both"],
+        help="Optional candidate label likelihood scoring mode.",
+    )
+
     args = parser.parse_args()
 
     config = _build_config(
         encoder=args.encoder,
         prompt_type=args.prompt_type,
         checkpoint_path=args.checkpoint_path,
+        candidate_scoring=args.candidate_scoring,
     )
 
     evaluate(config)

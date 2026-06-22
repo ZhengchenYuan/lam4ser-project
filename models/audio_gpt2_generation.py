@@ -65,6 +65,27 @@ class AudioGPT2Generation(nn.Module):
         print(f"  Frozen:    {frozen:,}")
         print(f"  Trainable: {trainable:,}")
 
+    def configure_tokenizer_vocab(
+        self,
+        tokenizer_length: int,
+        train_embeddings: bool = True,
+    ):
+        old_size = self.gpt2.transformer.wte.num_embeddings
+
+        if tokenizer_length != old_size:
+            self.gpt2.resize_token_embeddings(tokenizer_length)
+
+        if train_embeddings:
+            self.gpt2.transformer.wte.weight.requires_grad = True
+            self.gpt2.lm_head.weight.requires_grad = True
+
+        print("AudioGPT2Generation tokenizer/vocab configuration:")
+        print(f"  Model vocab before:       {old_size}")
+        print(f"  Tokenizer vocab:          {tokenizer_length}")
+        print(f"  Model vocab after:        {self.gpt2.transformer.wte.num_embeddings}")
+        print(f"  Input embeddings trainable: {self.gpt2.transformer.wte.weight.requires_grad}")
+        print(f"  LM head trainable:          {self.gpt2.lm_head.weight.requires_grad}")
+
     def forward(self, input_ids, audio_hidden):
         position_ids = torch.arange(
             input_ids.size(1),
