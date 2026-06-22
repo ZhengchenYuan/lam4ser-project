@@ -15,11 +15,29 @@ from models.compression.compressor import AudioCompressor
 from models.audio_gpt2_generation import AudioGPT2Generation
 
 
+GENERATION_PROMPT_TYPES = [
+    "generation",
+    "feature_generation",
+    "reasoning_generation_global",
+    "speaker_reasoning_generation",
+    "speaker_reasoning_generation_answer_first",
+]
+
+
+def _max_length_for_prompt_type(prompt_type: str) -> int:
+    if "reasoning_generation" in prompt_type:
+        return 224
+    if "feature" in prompt_type:
+        return 128
+    return 96
+
+
 def _build_config(
     encoder: str,
     prompt_type: str = "generation",
     lora_rank: int = 0,
     lora_lr: float = 1e-4,
+    epochs: int = 100,
 ) -> dict:
     tag = f"{encoder}_{prompt_type}_generation"
 
@@ -31,13 +49,13 @@ def _build_config(
     return {
         "encoder": encoder,
         "prompt_type": prompt_type,
-        "max_prompt_length": 128 if "feature" in prompt_type else 96,
+        "max_prompt_length": _max_length_for_prompt_type(prompt_type),
         "lora_rank": lora_rank,
         "lora_lr": lora_lr,
         "embeddings_path": f"embeddings/{encoder}_embeddings.pt",
         "batch_size": 4,
         "lr": 1e-5,
-        "epochs": 100,
+        "epochs": epochs,
         "adapter_dim": 64,
         "dropout": 0.3,
         "target_audio_len": 50,
@@ -313,11 +331,15 @@ if __name__ == "__main__":
     parser.add_argument(
         "--prompt_type",
         default="generation",
-        choices=[
-            "generation",
-            "feature_generation",
-        ],
+        choices=GENERATION_PROMPT_TYPES,
         help="Generation prompt template to use.",
+    )
+
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=100,
+        help="Number of training epochs.",
     )
 
     parser.add_argument(
@@ -341,6 +363,7 @@ if __name__ == "__main__":
         prompt_type=args.prompt_type,
         lora_rank=args.lora_rank,
         lora_lr=args.lora_lr,
+        epochs=args.epochs,
     )
 
     smoke_test(config)

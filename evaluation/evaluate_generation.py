@@ -1,5 +1,7 @@
 import argparse
+import csv
 import os
+import re
 import sys
 from collections import Counter
 
@@ -12,11 +14,38 @@ from sklearn.metrics import accuracy_score, f1_score, classification_report, con
 
 from data.generation_dataset import EmoDBGenerationDataset
 from data.dataset import speaker_independent_split
-from data.prompts import LABELS, get_prompt
-from features.acoustic_features import extract_acoustic_features
-from features.feature_prompt import acoustic_features_to_text
+from data.prompts import LABELS
 from models.compression.compressor import AudioCompressor
 from models.audio_gpt2_generation import AudioGPT2Generation
+
+
+GENERATION_PROMPT_TYPES = [
+    "generation",
+    "feature_generation",
+    "reasoning_generation_global",
+    "speaker_reasoning_generation",
+    "speaker_reasoning_generation_answer_first",
+]
+
+REASONING_PROMPT_TYPES = {
+    "reasoning_generation_global",
+    "speaker_reasoning_generation",
+    "speaker_reasoning_generation_answer_first",
+}
+
+
+def _max_length_for_prompt_type(prompt_type: str) -> int:
+    if "reasoning_generation" in prompt_type:
+        return 224
+    if "feature" in prompt_type:
+        return 128
+    return 96
+
+
+def _max_new_tokens_for_prompt_type(prompt_type: str) -> int:
+    if prompt_type in REASONING_PROMPT_TYPES:
+        return 96
+    return 5
 
 
 def _build_config(
@@ -29,7 +58,7 @@ def _build_config(
     return {
         "encoder": encoder,
         "prompt_type": prompt_type,
-        "max_prompt_length": 128 if "feature" in prompt_type else 96,
+        "max_prompt_length": _max_length_for_prompt_type(prompt_type),
         "embeddings_path": f"embeddings/{encoder}_embeddings.pt",
         "batch_size": 1,
         "adapter_dim": 64,
@@ -39,7 +68,7 @@ def _build_config(
         "val_speakers": ["09", "10"],
         "test_speakers": ["03", "08"],
         "checkpoint_path": checkpoint_path or f"checkpoints/{tag}_best.pt",
-        "max_new_tokens": 5,
+        "max_new_tokens": _max_new_tokens_for_prompt_type(prompt_type),
     }
 
 
@@ -61,6 +90,31 @@ def normalize_generated_label(text: str) -> str | None:
     return None
 
 
+def extract_reasoning_blocks(text: str) -> tuple[str, str, bool]:
+    think_match = re.search(r"<think>(.*?)</think>", text, flags=re.IGNORECASE | re.DOTALL)
+    answer_match = re.search(r"<answer>(.*?)</answer>", text, flags=re.IGNORECASE | re.DOTALL)
+
+    think_text = think_match.group(1).strip() if think_match else ""
+    answer_text = answer_match.group(1).strip() if answer_match else ""
+    format_valid = bool(think_text and answer_text)
+
+    return think_text, answer_text, format_valid
+
+
+def parse_generated_label(text: str, prompt_type: str) -> tuple[str | None, str, str, bool]:
+    think_text, answer_text, format_valid = extract_reasoning_blocks(text)
+
+    if prompt_type in REASONING_PROMPT_TYPES and answer_text:
+        pred_label = normalize_generated_label(answer_text)
+    else:
+        pred_label = normalize_generated_label(text)
+
+    if pred_label is None and answer_text:
+        pred_label = normalize_generated_label(answer_text)
+
+    return pred_label, think_text, answer_text, format_valid
+
+
 def build_prompt_for_eval(dataset, idx: int) -> str:
     """
     Rebuild only the prompt part for generation.
@@ -73,12 +127,7 @@ def build_prompt_for_eval(dataset, idx: int) -> str:
 
     and let the model generate the answer.
     """
-    if dataset.use_feature_prompt:
-        features = dataset.acoustic_feature_cache[idx]
-        feature_text = acoustic_features_to_text(features)
-        return get_prompt(dataset.prompt_type, features=feature_text)
-
-    return get_prompt(dataset.prompt_type)
+    return dataset._build_prompt_for_sample(idx)
 
 
 @torch.no_grad()
@@ -181,6 +230,8 @@ def evaluate(config):
     y_pred = []
     generated_answers = []
     generated_full_texts = []
+    sample_rows = []
+    format_valid_flags = []
 
     print("\nGeneration evaluation configuration:")
     print(f"  Encoder:     {config['encoder']}")
@@ -221,9 +272,15 @@ def evaluate(config):
             skip_special_tokens=True,
         )
 
-        answer_text = full_text[len(prompt):].strip()
+        if full_text.startswith(prompt):
+            generated_text = full_text[len(prompt):].strip()
+        else:
+            generated_text = full_text.strip()
 
-        pred_label = normalize_generated_label(answer_text)
+        pred_label, think_text, extracted_answer_text, format_valid = parse_generated_label(
+            generated_text,
+            config["prompt_type"],
+        )
 
         true_label = dataset.idx2label[int(class_label)]
 
@@ -234,8 +291,17 @@ def evaluate(config):
         else:
             y_pred.append(pred_label)
 
-        generated_answers.append(answer_text)
+        generated_answers.append(generated_text)
         generated_full_texts.append(full_text)
+        format_valid_flags.append(format_valid)
+        sample_rows.append({
+            "prompt_type": config["prompt_type"],
+            "true_label": true_label,
+            "parsed_prediction": pred_label or "invalid",
+            "generated_text": generated_text,
+            "think_text": think_text,
+            "answer_text": extracted_answer_text,
+        })
 
     all_eval_labels = LABELS + ["invalid"]
 
@@ -250,11 +316,25 @@ def evaluate(config):
 
     invalid_count = sum(1 for pred in y_pred if pred == "invalid")
     validity = 1.0 - invalid_count / max(len(y_pred), 1)
+    format_validity = sum(format_valid_flags) / max(len(format_valid_flags), 1)
 
     print("Generation test results:")
     print(f"  Accuracy:                 {acc:.4f}")
     print(f"  Weighted F1:              {weighted_f1:.4f}")
     print(f"  Generated label validity: {validity:.4f}")
+    print(f"  Format validity:          {format_validity:.4f}")
+    print()
+
+    per_class_f1 = f1_score(
+        y_true,
+        y_pred,
+        labels=LABELS,
+        average=None,
+        zero_division=0,
+    )
+    print("Per-class F1:")
+    for label, score in zip(LABELS, per_class_f1):
+        print(f"  {label}: {score:.4f}")
     print()
 
     print("Classification report:")
@@ -289,6 +369,29 @@ def evaluate(config):
         print(f"Pred:      {y_pred[i]}")
         print(f"Generated: {generated_answers[i]}")
 
+    os.makedirs("evaluation_outputs", exist_ok=True)
+    sample_path = os.path.join(
+        "evaluation_outputs",
+        f"{config['encoder']}_{config['prompt_type']}_samples.csv",
+    )
+    with open(sample_path, "w", newline="") as fp:
+        writer = csv.DictWriter(
+            fp,
+            fieldnames=[
+                "prompt_type",
+                "true_label",
+                "parsed_prediction",
+                "generated_text",
+                "think_text",
+                "answer_text",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(sample_rows[:50])
+
+    print()
+    print(f"Saved generated output samples to: {sample_path}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -308,10 +411,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--prompt_type",
         default="generation",
-        choices=[
-            "generation",
-            "feature_generation",
-        ],
+        choices=GENERATION_PROMPT_TYPES,
         help="Generation prompt template to evaluate.",
     )
 

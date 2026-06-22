@@ -16,6 +16,15 @@ from typing import Dict
 
 import numpy as np
 
+BASELINE_FEATURE_KEYS = [
+    "pitch_mean",
+    "pitch_std",
+    "energy_mean",
+    "energy_std",
+    "duration",
+    "tempo",
+]
+
 
 def acoustic_features_to_text(features: Dict[str, float]) -> str:
     """
@@ -55,6 +64,205 @@ def acoustic_features_to_text(features: Dict[str, float]) -> str:
     ]
 
     return ", ".join(parts)
+
+
+def compute_feature_baseline(feature_dicts):
+    """
+    Compute simple mean/std acoustic baselines from enrollment features.
+    """
+    baseline = {}
+
+    for key in BASELINE_FEATURE_KEYS:
+        values = [
+            float(features.get(key, 0.0))
+            for features in feature_dicts
+            if features.get(key, None) is not None
+            and np.isfinite(features.get(key, 0.0))
+        ]
+
+        if not values:
+            baseline[key] = {"mean": 0.0, "std": 1.0}
+            continue
+
+        values = np.array(values, dtype=float)
+        std = float(values.std())
+        if std < 1e-6:
+            std = 1.0
+
+        baseline[key] = {
+            "mean": float(values.mean()),
+            "std": std,
+        }
+
+    return baseline
+
+
+def acoustic_features_to_global_caption(features: Dict[str, float]) -> str:
+    """
+    Convert absolute acoustic features into a natural-language target caption.
+    """
+    pitch = _describe_pitch(features.get("pitch_mean", 0.0))
+    energy = _describe_energy(features.get("energy_mean", 0.0))
+    duration = _describe_duration(features.get("duration", 0.0))
+    rhythm = _describe_rhythm(features.get("tempo", 0.0))
+
+    cues = _join_cues([
+        _quality_phrase(pitch),
+        _quality_phrase(energy),
+        _quality_phrase(rhythm),
+        _quality_phrase(duration),
+    ])
+
+    return f"The utterance has {cues}."
+
+
+def acoustic_features_to_speaker_relative_caption(
+    features: Dict[str, float],
+    baseline,
+    threshold: float = 0.5,
+) -> str:
+    """
+    Convert acoustic features into a speaker-relative target caption.
+    """
+    cues = _join_cues([
+        _relative_feature_phrase(
+            features,
+            baseline,
+            "pitch_mean",
+            lower="relatively lower pitch",
+            similar="pitch close to this speaker's baseline",
+            higher="relatively higher pitch",
+            threshold=threshold,
+        ),
+        _relative_feature_phrase(
+            features,
+            baseline,
+            "energy_mean",
+            lower="relatively lower energy",
+            similar="energy close to this speaker's baseline",
+            higher="relatively higher energy",
+            threshold=threshold,
+        ),
+        _relative_feature_phrase(
+            features,
+            baseline,
+            "tempo",
+            lower="a slower rhythm",
+            similar="a baseline-like rhythm",
+            higher="a faster rhythm",
+            threshold=threshold,
+        ),
+        _relative_feature_phrase(
+            features,
+            baseline,
+            "duration",
+            lower="a shorter duration",
+            similar="a typical duration",
+            higher="a longer duration",
+            threshold=threshold,
+        ),
+    ])
+
+    return (
+        "Compared with this speaker's usual speaking pattern, "
+        f"the utterance has {cues}."
+    )
+
+
+def emotion_reasoning_sentence(label: str) -> str:
+    """
+    Template-based target-side emotion reasoning.
+    """
+    reasoning = {
+        "anger": (
+            "These cues suggest stronger emotional activation and tense delivery, "
+            "which supports anger."
+        ),
+        "happiness": (
+            "These cues suggest lively or energetic delivery, which supports "
+            "happiness."
+        ),
+        "sadness": (
+            "These cues suggest subdued delivery and reduced activation, which "
+            "supports sadness."
+        ),
+        "boredom": (
+            "These cues suggest low activation and flat or slow delivery, which "
+            "supports boredom."
+        ),
+        "neutral": (
+            "These cues suggest steady, baseline-like delivery, which supports "
+            "neutral."
+        ),
+        "fear": (
+            "These cues suggest activated or tense delivery with elevated arousal, "
+            "which supports fear."
+        ),
+        "disgust": (
+            "These cues suggest tense, harsh, or restrained delivery, which "
+            "supports disgust."
+        ),
+    }
+
+    return reasoning.get(
+        label,
+        f"These cues support the {label} emotion label.",
+    )
+
+
+def _relative_feature_phrase(
+    features,
+    baseline,
+    key,
+    lower,
+    similar,
+    higher,
+    threshold,
+):
+    stats = baseline.get(key, {"mean": 0.0, "std": 1.0})
+    z = _zscore(
+        features.get(key, 0.0),
+        stats.get("mean", 0.0),
+        stats.get("std", 1.0),
+    )
+
+    if z > threshold:
+        return higher
+    if z < -threshold:
+        return lower
+    return similar
+
+
+def _describe_rhythm(tempo: float) -> str:
+    rhythm = _describe_tempo(tempo)
+    if rhythm == "slow tempo":
+        return "slow rhythm"
+    if rhythm == "medium tempo":
+        return "medium rhythm"
+    if rhythm == "fast tempo":
+        return "fast rhythm"
+    return "unknown rhythm"
+
+
+def _quality_phrase(text: str) -> str:
+    if text.startswith("unknown"):
+        return None
+    if text in {"short duration", "medium duration", "long duration"}:
+        return f"a {text}"
+    return text
+
+
+def _join_cues(cues) -> str:
+    cues = [cue for cue in cues if cue]
+
+    if not cues:
+        return "limited measurable acoustic cues"
+    if len(cues) == 1:
+        return cues[0]
+    if len(cues) == 2:
+        return f"{cues[0]} and {cues[1]}"
+
+    return f"{', '.join(cues[:-1])}, and {cues[-1]}"
 
 
 

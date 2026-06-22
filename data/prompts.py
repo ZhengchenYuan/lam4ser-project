@@ -54,6 +54,18 @@ PROMPTS = {
         f"Possible labels are {LABEL_TEXT}. "
         "Answer with one label only:"
     ),
+
+    "reasoning_generation_global": (
+        "Describe the emotional speech and predict the emotion."
+    ),
+
+    "speaker_reasoning_generation": (
+        "Describe the emotional speech and predict the emotion."
+    ),
+
+    "speaker_reasoning_generation_answer_first": (
+        "Describe the emotional speech and predict the emotion."
+    ),
 }
 
 
@@ -70,6 +82,9 @@ def get_prompt(prompt_type: str, features: str | None = None) -> str:
             - feature_speaker
             - generation
             - feature_generation
+            - reasoning_generation_global
+            - speaker_reasoning_generation
+            - speaker_reasoning_generation_answer_first
 
         features:
             Textual acoustic feature description, for example:
