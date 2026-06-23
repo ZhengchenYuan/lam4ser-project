@@ -16,7 +16,7 @@ import librosa
 import audiofile
 from sklearn.svm import SVC
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, classification_report
+from sklearn.metrics import accuracy_score, f1_score, recall_score, confusion_matrix, classification_report
 
 from data.dataset import extract_speaker_id
 
@@ -159,18 +159,21 @@ def run(dataset: str = "aibo"):
     test_preds  = svm.predict(X_test)
     test_acc    = accuracy_score(y_test, test_preds)
     test_f1     = f1_score(y_test, test_preds, average="weighted")
+    test_uar    = recall_score(y_test, test_preds, average="macro") if dataset == "aibo" else None
     cm          = confusion_matrix(y_test, test_preds)
     label_names = [idx2label[i] for i in range(len(idx2label))]
 
     print(f"\nSVM + MFCC + pitch + energy  —  test ({len(y_test)} samples)")
     print(f"  Accuracy:    {test_acc:.4f}")
     print(f"  Weighted F1: {test_f1:.4f}")
+    if test_uar is not None:
+        print(f"  UAR:         {test_uar:.4f}")
     print(classification_report(y_test, test_preds, target_names=label_names))
     print("  " + "  ".join(f"{n[:4]:>4}" for n in label_names))
     for i, row in enumerate(cm):
         print(f"  {label_names[i][:6]:<6}  {'  '.join(f'{v:4d}' for v in row)}")
 
-    return {"accuracy": test_acc, "f1": test_f1}
+    return {"accuracy": test_acc, "f1": test_f1, "uar": test_uar}
 
 
 if __name__ == "__main__":

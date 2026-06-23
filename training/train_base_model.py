@@ -25,6 +25,9 @@ DATASET_CONFIGS = {
         "num_classes_hint": 7,
         "val_speakers": ["09", "10"],
         "test_speakers": ["03", "08"],
+        "epochs": 60,
+        "selection_metric": "f1",
+        "min_selection_epoch": 1,
     },
     "aibo": {
         "embeddings_prefix": "aibo_",
@@ -32,6 +35,9 @@ DATASET_CONFIGS = {
         "num_classes_hint": 5,
         "val_speakers": ["Ohm_31", "Ohm_32"],
         "test_speakers": [f"Mont_{i:02d}" for i in range(1, 26)],
+        "epochs": 30,
+        "selection_metric": "uar",
+        "min_selection_epoch": 5,
     },
 }
 
@@ -62,7 +68,7 @@ def _build_config(
         "embeddings_path": f"embeddings/{ds['embeddings_prefix']}{encoder}_embeddings.pt",
         "batch_size": 8,
         "lr": 1e-5,
-        "epochs": 60,
+        "epochs": ds["epochs"],
         "adapter_dim": 64,
         "dropout": 0.3,
         "target_audio_len": 50,
@@ -70,6 +76,8 @@ def _build_config(
         "val_speakers": ds["val_speakers"],
         "test_speakers": ds["test_speakers"],
         "num_classes_hint": ds["num_classes_hint"],
+        "selection_metric": ds["selection_metric"],
+        "min_selection_epoch": ds["min_selection_epoch"],
         "checkpoint_path": f"{checkpoint_dir}/{tag}_best.pt",
         "loss_curve_path": f"{checkpoint_dir}/{tag}_loss_curve.png",
     }
@@ -154,11 +162,11 @@ def train(config):
 
     train_labels = [dataset[i]["label"].item() for i in train_idx]
 
-    class_weights = np.sqrt(compute_class_weight(
+    class_weights = compute_class_weight(
         "balanced",
         classes=np.arange(num_classes),
         y=train_labels,
-    ))
+    ) ** 0.6
 
     criterion = nn.CrossEntropyLoss(
         weight=torch.tensor(class_weights, dtype=torch.float).to(device),
@@ -205,10 +213,12 @@ def train(config):
     )
 
     train_losses, val_losses = [], []
-    best_val_f1 = -1.0
+    selection_metric = config["selection_metric"]
+    best_metric = -1.0
 
     print("\nTraining configuration:")
     print(f"  Dataset:      {config['dataset']}")
+    print(f"  Selection:    val_{selection_metric}")
     print(f"  Encoder:      {config['encoder']}")
     print(f"  Prompt type:  {config['prompt_type']}")
     print(f"  Prompt length:{config['max_prompt_length']}")
@@ -278,8 +288,10 @@ def train(config):
             f"val_uar: {val_uar:.4f}"
         )
 
-        if val_f1 > best_val_f1:
-            best_val_f1 = val_f1
+        current_metric = val_uar if selection_metric == "uar" else val_f1
+
+        if epoch >= config["min_selection_epoch"] and current_metric > best_metric:
+            best_metric = current_metric
 
             torch.save(
                 {
@@ -301,7 +313,7 @@ def train(config):
                 config["checkpoint_path"],
             )
 
-            print(f"  ✓ Saved best checkpoint (val_f1: {val_f1:.4f})")
+            print(f"  ✓ Saved best checkpoint (val_{selection_metric}: {current_metric:.4f})")
 
     checkpoint = torch.load(
         config["checkpoint_path"],

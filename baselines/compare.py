@@ -104,6 +104,11 @@ def main():
     print(row("linear probe", [probe_results[e]["linear"]["accuracy"]             for e in encoders]))
     print(row("MLP probe",    [probe_results[e]["mlp"]["accuracy"]                for e in encoders]))
     print(row("AudioGPT2",    [_AUDIOGPT2.get(e, {}).get("accuracy", float("nan")) for e in encoders]))
+    if args.dataset == "aibo":
+        print("  " + "-" * (22 + col * len(encoders)))
+        print(row("SVM + MFCC (UAR)",   [svm_result["uar"]]                       * len(encoders)))
+        print(row("linear probe (UAR)", [probe_results[e]["linear"]["uar"]        for e in encoders]))
+        print(row("MLP probe (UAR)",    [probe_results[e]["mlp"]["uar"]           for e in encoders]))
     print("  " + "-" * (22 + col * len(encoders)))
     print(f"  Split: {DATASET_SPLITS[args.dataset]}")
     print("=" * (24 + col * len(encoders)))

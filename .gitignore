@@ -16,6 +16,8 @@ embeddings/
 loss_curve.png
 dataset/
 
+AIBO_runs.txt
+
 .vscode/settings.json
 
 # SLURM logs
