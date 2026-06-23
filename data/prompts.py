@@ -64,6 +64,11 @@ PROMPTS = {
         "Speaker-relative acoustic cues: {features}."
     ),
 
+    "speaker_feature_answer_caption_generation": (
+        "Describe the emotional speech and predict the emotion. "
+        "Speaker-relative acoustic cues: {features}."
+    ),
+
     "reasoning_generation_global": (
         "Describe the emotional speech and predict the emotion."
     ),
@@ -93,6 +98,7 @@ def get_prompt(prompt_type: str, features: str | None = None) -> str:
             - feature_generation
             - answer_generation
             - speaker_feature_answer_generation
+            - speaker_feature_answer_caption_generation
             - reasoning_generation_global
             - speaker_reasoning_generation
             - speaker_reasoning_generation_answer_first

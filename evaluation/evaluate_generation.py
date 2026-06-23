@@ -25,6 +25,7 @@ GENERATION_PROMPT_TYPES = [
     "feature_generation",
     "answer_generation",
     "speaker_feature_answer_generation",
+    "speaker_feature_answer_caption_generation",
     "reasoning_generation_global",
     "speaker_reasoning_generation",
     "speaker_reasoning_generation_answer_first",
@@ -39,11 +40,13 @@ REASONING_PROMPT_TYPES = {
 ANSWER_TAG_PROMPT_TYPES = REASONING_PROMPT_TYPES | {
     "answer_generation",
     "speaker_feature_answer_generation",
+    "speaker_feature_answer_caption_generation",
 }
 
 LABEL_CONSTRAINED_PROMPT_TYPES = {
     "answer_generation",
     "speaker_feature_answer_generation",
+    "speaker_feature_answer_caption_generation",
 }
 
 
