@@ -318,6 +318,28 @@ def _print_classification_metrics(y_true, y_pred):
     print(Counter(y_pred))
 
 
+def _single_token_id(tokenizer, token: str) -> int | None:
+    token_ids = tokenizer.encode(token, add_special_tokens=False)
+    if len(token_ids) != 1:
+        return None
+    return token_ids[0]
+
+
+def _structured_token_ids(tokenizer):
+    return {
+        "think_start": _single_token_id(tokenizer, "<think>"),
+        "think_end": _single_token_id(tokenizer, "</think>"),
+        "answer_start": _single_token_id(tokenizer, "<answer>"),
+        "answer_end": _single_token_id(tokenizer, "</answer>"),
+    }
+
+
+def _contains_token(input_ids, token_id: int | None) -> bool:
+    if token_id is None:
+        return False
+    return bool(input_ids.eq(token_id).any().item())
+
+
 @torch.no_grad()
 def greedy_generate(
     model,
@@ -342,15 +364,34 @@ def greedy_generate(
     model.eval()
 
     generated = input_ids
+    structured_ids = _structured_token_ids(tokenizer)
 
     for _ in range(max_new_tokens):
         logits = model(generated, audio_hidden)
         next_token_logits = logits[:, -1, :]
+
+        if _contains_token(generated, structured_ids["answer_start"]):
+            token_id = structured_ids["answer_start"]
+            if token_id is not None:
+                next_token_logits[:, token_id] = -float("inf")
+
+        if _contains_token(generated, structured_ids["think_start"]):
+            token_id = structured_ids["think_start"]
+            if token_id is not None:
+                next_token_logits[:, token_id] = -float("inf")
+
+        if _contains_token(generated, structured_ids["think_end"]):
+            token_id = structured_ids["think_end"]
+            if token_id is not None:
+                next_token_logits[:, token_id] = -float("inf")
+
         next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
 
         generated = torch.cat([generated, next_token], dim=1)
 
         if next_token.item() == tokenizer.eos_token_id:
+            break
+        if next_token.item() == structured_ids["answer_end"]:
             break
 
     return generated
