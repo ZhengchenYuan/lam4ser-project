@@ -127,7 +127,7 @@ def parse_generated_label(text: str, prompt_type: str) -> tuple[str | None, str,
     if pred_label is None and answer_text:
         pred_label = normalize_generated_label(answer_text)
 
-    if prompt_type == "answer_generation":
+    if prompt_type in LABEL_CONSTRAINED_PROMPT_TYPES:
         format_valid = bool(answer_text)
 
     return pred_label, think_text, answer_text, format_valid
