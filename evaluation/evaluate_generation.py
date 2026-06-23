@@ -340,6 +340,66 @@ def _contains_token(input_ids, token_id: int | None) -> bool:
     return bool(input_ids.eq(token_id).any().item())
 
 
+def _label_token_sequences(tokenizer):
+    return {
+        label: tokenizer.encode(label, add_special_tokens=False)
+        for label in LABELS
+    }
+
+
+def _answer_label_prefix(generated, answer_start_id: int | None):
+    if answer_start_id is None:
+        return []
+
+    token_ids = generated[0].tolist()
+    for idx in range(len(token_ids) - 1, -1, -1):
+        if token_ids[idx] == answer_start_id:
+            return token_ids[idx + 1:]
+
+    return []
+
+
+def _allowed_answer_generation_tokens(
+    generated,
+    structured_ids,
+    label_sequences,
+):
+    answer_start_id = structured_ids["answer_start"]
+    answer_end_id = structured_ids["answer_end"]
+
+    if answer_start_id is None or answer_end_id is None:
+        return None
+
+    if not _contains_token(generated, answer_start_id):
+        return [answer_start_id]
+
+    label_prefix = _answer_label_prefix(generated, answer_start_id)
+
+    for sequence in label_sequences.values():
+        if label_prefix == sequence:
+            return [answer_end_id]
+
+    allowed = set()
+    for sequence in label_sequences.values():
+        if sequence[:len(label_prefix)] == label_prefix:
+            if len(sequence) > len(label_prefix):
+                allowed.add(sequence[len(label_prefix)])
+
+    return sorted(allowed)
+
+
+def _mask_except(next_token_logits, allowed_token_ids):
+    if allowed_token_ids is None:
+        return
+
+    masked_logits = next_token_logits.new_full(
+        next_token_logits.shape,
+        -float("inf"),
+    )
+    masked_logits[:, allowed_token_ids] = next_token_logits[:, allowed_token_ids]
+    next_token_logits.copy_(masked_logits)
+
+
 @torch.no_grad()
 def greedy_generate(
     model,
@@ -347,6 +407,7 @@ def greedy_generate(
     input_ids,
     audio_hidden,
     max_new_tokens: int = 5,
+    prompt_type: str = "generation",
 ):
     """
     Greedy decoding for a short emotion label.
@@ -365,10 +426,19 @@ def greedy_generate(
 
     generated = input_ids
     structured_ids = _structured_token_ids(tokenizer)
+    label_sequences = _label_token_sequences(tokenizer)
 
     for _ in range(max_new_tokens):
         logits = model(generated, audio_hidden)
         next_token_logits = logits[:, -1, :]
+
+        if prompt_type == "answer_generation":
+            allowed_token_ids = _allowed_answer_generation_tokens(
+                generated,
+                structured_ids,
+                label_sequences,
+            )
+            _mask_except(next_token_logits, allowed_token_ids)
 
         if _contains_token(generated, structured_ids["answer_start"]):
             token_id = structured_ids["answer_start"]
@@ -495,6 +565,7 @@ def evaluate(config):
             input_ids=input_ids,
             audio_hidden=audio_compressed,
             max_new_tokens=config["max_new_tokens"],
+            prompt_type=config["prompt_type"],
         )
 
         full_text = tokenizer.decode(
