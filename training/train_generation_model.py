@@ -20,6 +20,7 @@ GENERATION_PROMPT_TYPES = [
     "generation",
     "feature_generation",
     "answer_generation",
+    "speaker_feature_answer_generation",
     "reasoning_generation_global",
     "speaker_reasoning_generation",
     "speaker_reasoning_generation_answer_first",

@@ -24,6 +24,7 @@ GENERATION_PROMPT_TYPES = [
     "generation",
     "feature_generation",
     "answer_generation",
+    "speaker_feature_answer_generation",
     "reasoning_generation_global",
     "speaker_reasoning_generation",
     "speaker_reasoning_generation_answer_first",
@@ -37,6 +38,12 @@ REASONING_PROMPT_TYPES = {
 
 ANSWER_TAG_PROMPT_TYPES = REASONING_PROMPT_TYPES | {
     "answer_generation",
+    "speaker_feature_answer_generation",
+}
+
+LABEL_CONSTRAINED_PROMPT_TYPES = {
+    "answer_generation",
+    "speaker_feature_answer_generation",
 }
 
 
@@ -432,7 +439,7 @@ def greedy_generate(
         logits = model(generated, audio_hidden)
         next_token_logits = logits[:, -1, :]
 
-        if prompt_type == "answer_generation":
+        if prompt_type in LABEL_CONSTRAINED_PROMPT_TYPES:
             allowed_token_ids = _allowed_answer_generation_tokens(
                 generated,
                 structured_ids,

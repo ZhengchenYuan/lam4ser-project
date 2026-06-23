@@ -9,6 +9,7 @@ from features.acoustic_features import extract_acoustic_features
 from features.feature_prompt import (
     acoustic_features_to_global_caption,
     acoustic_features_to_speaker_relative_caption,
+    acoustic_features_to_speaker_relative_cues,
     acoustic_features_to_text,
     compute_feature_baseline,
     emotion_reasoning_sentence,
@@ -19,6 +20,7 @@ GENERATION_PROMPT_TYPES = (
     "generation",
     "feature_generation",
     "answer_generation",
+    "speaker_feature_answer_generation",
     "reasoning_generation_global",
     "speaker_reasoning_generation",
     "speaker_reasoning_generation_answer_first",
@@ -26,6 +28,7 @@ GENERATION_PROMPT_TYPES = (
 
 ANSWER_TAG_PROMPT_TYPES = (
     "answer_generation",
+    "speaker_feature_answer_generation",
 )
 
 REASONING_PROMPT_TYPES = (
@@ -35,6 +38,12 @@ REASONING_PROMPT_TYPES = (
 )
 
 SPEAKER_REASONING_PROMPT_TYPES = (
+    "speaker_reasoning_generation",
+    "speaker_reasoning_generation_answer_first",
+)
+
+SPEAKER_BASELINE_PROMPT_TYPES = (
+    "speaker_feature_answer_generation",
     "speaker_reasoning_generation",
     "speaker_reasoning_generation_answer_first",
 )
@@ -78,6 +87,7 @@ class EmoDBGenerationDataset(Dataset):
         self.use_answer_tag_target = prompt_type in ANSWER_TAG_PROMPT_TYPES
         self.use_reasoning_target = prompt_type in REASONING_PROMPT_TYPES
         self.use_speaker_reasoning = prompt_type in SPEAKER_REASONING_PROMPT_TYPES
+        self.use_speaker_baseline = prompt_type in SPEAKER_BASELINE_PROMPT_TYPES
 
         data = torch.load(embeddings_path, weights_only=False)
 
@@ -154,7 +164,7 @@ class EmoDBGenerationDataset(Dataset):
                 torch.save(self.acoustic_feature_cache, cache_path)
                 print(f"Saved acoustic feature cache to: {cache_path}")
 
-        if self.use_speaker_reasoning:
+        if self.use_speaker_baseline:
             self._build_enrollment_sets()
 
         self.input_ids_list = []
@@ -252,7 +262,20 @@ class EmoDBGenerationDataset(Dataset):
 
         if self.use_feature_prompt:
             features = self.acoustic_feature_cache[real_idx]
-            feature_text = acoustic_features_to_text(features)
+
+            if self.prompt_type == "speaker_feature_answer_generation":
+                speaker_id = extract_speaker_id(self.all_file_paths[real_idx])
+                baseline = self.speaker_baselines.get(
+                    speaker_id,
+                    compute_feature_baseline([features]),
+                )
+                feature_text = acoustic_features_to_speaker_relative_cues(
+                    features,
+                    baseline,
+                )
+            else:
+                feature_text = acoustic_features_to_text(features)
+
             return get_prompt(self.prompt_type, features=feature_text)
 
         return get_prompt(self.prompt_type)

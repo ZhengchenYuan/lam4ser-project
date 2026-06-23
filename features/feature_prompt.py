@@ -169,6 +169,54 @@ def acoustic_features_to_speaker_relative_caption(
     )
 
 
+def acoustic_features_to_speaker_relative_cues(
+    features: Dict[str, float],
+    baseline,
+    threshold: float = 0.5,
+) -> str:
+    """
+    Convert acoustic features into compact speaker-relative prompt cues.
+    """
+    return _join_cues([
+        _relative_feature_phrase(
+            features,
+            baseline,
+            "pitch_mean",
+            lower="lower pitch than this speaker's baseline",
+            similar="baseline-like pitch",
+            higher="higher pitch than this speaker's baseline",
+            threshold=threshold,
+        ),
+        _relative_feature_phrase(
+            features,
+            baseline,
+            "energy_mean",
+            lower="lower energy than this speaker's baseline",
+            similar="baseline-like energy",
+            higher="higher energy than this speaker's baseline",
+            threshold=threshold,
+        ),
+        _relative_feature_phrase(
+            features,
+            baseline,
+            "tempo",
+            lower="slower rhythm than this speaker's baseline",
+            similar="baseline-like rhythm",
+            higher="faster rhythm than this speaker's baseline",
+            threshold=threshold,
+        ),
+        _relative_feature_phrase(
+            features,
+            baseline,
+            "duration",
+            lower="shorter duration than this speaker's baseline",
+            similar="typical duration",
+            higher="longer duration than this speaker's baseline",
+            threshold=threshold,
+        ),
+    ])
+
+
 def emotion_reasoning_sentence(label: str) -> str:
     """
     Template-based target-side emotion reasoning.
