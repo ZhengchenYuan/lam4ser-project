@@ -217,6 +217,106 @@ def acoustic_features_to_speaker_relative_cues(
     ])
 
 
+def speaker_relative_evidence_sentence(
+    features: Dict[str, float],
+    baseline,
+    label: str,
+    threshold: float = 0.5,
+) -> str:
+    """
+    Build a short evidence sentence from the most salient speaker-relative cues.
+    """
+    cues = _speaker_relative_evidence_cues(features, baseline, threshold)
+    cue_text = _join_cues([cue["phrase"] for cue in cues])
+    verb = "suggests" if len(cues) == 1 and cues[0].get("singular") else "suggest"
+    interpretation = _interpret_evidence_cues(cues)
+
+    return f"{cue_text} {verb} {interpretation}, supporting {label}."
+
+
+def _speaker_relative_evidence_cues(features, baseline, threshold):
+    cue_specs = [
+        (
+            "pitch_mean",
+            "lower pitch than this speaker's baseline",
+            "higher pitch than this speaker's baseline",
+            "pitch",
+        ),
+        (
+            "energy_mean",
+            "lower energy than this speaker's baseline",
+            "higher energy than this speaker's baseline",
+            "energy",
+        ),
+        (
+            "tempo",
+            "slower rhythm than this speaker's baseline",
+            "faster rhythm than this speaker's baseline",
+            "rhythm",
+        ),
+        (
+            "duration",
+            "shorter duration than this speaker's baseline",
+            "longer duration than this speaker's baseline",
+            "duration",
+        ),
+    ]
+
+    cues = []
+    for key, lower, higher, name in cue_specs:
+        stats = baseline.get(key, {"mean": 0.0, "std": 1.0})
+        z = _zscore(
+            features.get(key, 0.0),
+            stats.get("mean", 0.0),
+            stats.get("std", 1.0),
+        )
+
+        if abs(z) < threshold:
+            continue
+
+        cues.append({
+            "name": name,
+            "z": z,
+            "phrase": higher if z > 0 else lower,
+        })
+
+    cues.sort(key=lambda cue: abs(cue["z"]), reverse=True)
+
+    if cues:
+        return cues[:2]
+
+    return [{
+        "name": "delivery",
+        "z": 0.0,
+        "phrase": "baseline-like prosody",
+        "singular": True,
+    }]
+
+
+def _interpret_evidence_cues(cues):
+    high_activation = any(
+        cue["name"] in {"energy", "rhythm", "pitch"} and cue["z"] > 0
+        for cue in cues
+    )
+    low_activation = any(
+        cue["name"] in {"energy", "rhythm", "pitch"} and cue["z"] < 0
+        for cue in cues
+    )
+    longer = any(cue["name"] == "duration" and cue["z"] > 0 for cue in cues)
+    baseline_like = all(abs(cue["z"]) < 1e-6 for cue in cues)
+
+    if baseline_like:
+        return "a steady speaker-relative delivery"
+    if high_activation:
+        return "stronger activation and expressiveness"
+    if low_activation and longer:
+        return "subdued and sustained delivery"
+    if low_activation:
+        return "reduced activation and subdued delivery"
+
+    return "a distinct speaker-relative prosodic pattern"
+
+
 def emotion_reasoning_sentence(label: str) -> str:
     """
     Template-based target-side emotion reasoning.

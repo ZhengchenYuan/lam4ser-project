@@ -13,6 +13,7 @@ from features.feature_prompt import (
     acoustic_features_to_text,
     compute_feature_baseline,
     emotion_reasoning_sentence,
+    speaker_relative_evidence_sentence,
 )
 
 
@@ -22,6 +23,7 @@ GENERATION_PROMPT_TYPES = (
     "answer_generation",
     "speaker_feature_answer_generation",
     "speaker_feature_answer_caption_generation",
+    "speaker_feature_answer_evidence_generation",
     "reasoning_generation_global",
     "speaker_reasoning_generation",
     "speaker_reasoning_generation_answer_first",
@@ -31,10 +33,15 @@ ANSWER_TAG_PROMPT_TYPES = (
     "answer_generation",
     "speaker_feature_answer_generation",
     "speaker_feature_answer_caption_generation",
+    "speaker_feature_answer_evidence_generation",
 )
 
 CAPTION_TARGET_PROMPT_TYPES = (
     "speaker_feature_answer_caption_generation",
+)
+
+EVIDENCE_TARGET_PROMPT_TYPES = (
+    "speaker_feature_answer_evidence_generation",
 )
 
 REASONING_PROMPT_TYPES = (
@@ -51,6 +58,7 @@ SPEAKER_REASONING_PROMPT_TYPES = (
 SPEAKER_BASELINE_PROMPT_TYPES = (
     "speaker_feature_answer_generation",
     "speaker_feature_answer_caption_generation",
+    "speaker_feature_answer_evidence_generation",
     "speaker_reasoning_generation",
     "speaker_reasoning_generation_answer_first",
 )
@@ -93,6 +101,7 @@ class EmoDBGenerationDataset(Dataset):
         self.use_feature_prompt = "feature" in prompt_type
         self.use_answer_tag_target = prompt_type in ANSWER_TAG_PROMPT_TYPES
         self.use_caption_target = prompt_type in CAPTION_TARGET_PROMPT_TYPES
+        self.use_evidence_target = prompt_type in EVIDENCE_TARGET_PROMPT_TYPES
         self.use_reasoning_target = prompt_type in REASONING_PROMPT_TYPES
         self.use_speaker_reasoning = prompt_type in SPEAKER_REASONING_PROMPT_TYPES
         self.use_speaker_baseline = prompt_type in SPEAKER_BASELINE_PROMPT_TYPES
@@ -274,6 +283,7 @@ class EmoDBGenerationDataset(Dataset):
             if self.prompt_type in (
                 "speaker_feature_answer_generation",
                 "speaker_feature_answer_caption_generation",
+                "speaker_feature_answer_evidence_generation",
             ):
                 speaker_id = extract_speaker_id(self.all_file_paths[real_idx])
                 baseline = self.speaker_baselines.get(
@@ -305,6 +315,20 @@ class EmoDBGenerationDataset(Dataset):
                     baseline,
                 )
                 return f"<answer>{label_text}</answer><caption>{caption}</caption>"
+
+            if self.use_evidence_target:
+                features = self.acoustic_feature_cache[real_idx]
+                speaker_id = extract_speaker_id(self.all_file_paths[real_idx])
+                baseline = self.speaker_baselines.get(
+                    speaker_id,
+                    compute_feature_baseline([features]),
+                )
+                evidence = speaker_relative_evidence_sentence(
+                    features,
+                    baseline,
+                    label_text,
+                )
+                return f"<answer>{label_text}</answer><evidence>{evidence}</evidence>"
 
             if self.use_answer_tag_target:
                 return f"<answer>{label_text}</answer>"

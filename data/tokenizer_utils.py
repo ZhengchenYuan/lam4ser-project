@@ -8,6 +8,8 @@ STRUCTURED_SPECIAL_TOKENS = [
     "</answer>",
     "<caption>",
     "</caption>",
+    "<evidence>",
+    "</evidence>",
 ]
 
 
@@ -15,6 +17,7 @@ TOKENIZER_DIAGNOSTIC_TEXTS = [
     "<answer>anger</answer>",
     "<think>The speech has high energy.</think><answer>anger</answer>",
     "<caption>high pitch, high energy</caption><answer>anger</answer>",
+    "<answer>anger</answer><evidence>High energy suggests strong activation.</evidence>",
 ]
 
 
