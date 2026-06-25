@@ -534,6 +534,14 @@ def greedy_generate(
             )
             _mask_except(next_token_logits, allowed_token_ids)
 
+        if (
+            generate_evidence
+            and structured_ids["evidence_start"] is not None
+            and _contains_token(generated, structured_ids["answer_end"])
+            and not _contains_token(generated, structured_ids["evidence_start"])
+        ):
+            _mask_except(next_token_logits, [structured_ids["evidence_start"]])
+
         if _contains_token(generated, structured_ids["answer_start"]):
             token_id = structured_ids["answer_start"]
             if token_id is not None:
