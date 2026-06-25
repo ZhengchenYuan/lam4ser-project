@@ -72,8 +72,18 @@ def _build_config(
     prompt_type: str,
     checkpoint_path: str | None = None,
     candidate_scoring: str = "none",
+    generate_evidence: bool = False,
 ) -> dict:
     tag = f"{encoder}_{prompt_type}_generation"
+    max_new_tokens = _max_new_tokens_for_prompt_type(prompt_type)
+
+    if generate_evidence:
+        if prompt_type != "speaker_feature_answer_evidence_generation":
+            raise ValueError(
+                "--generate_evidence is only supported with "
+                "speaker_feature_answer_evidence_generation."
+            )
+        max_new_tokens = 64
 
     return {
         "encoder": encoder,
@@ -88,8 +98,9 @@ def _build_config(
         "val_speakers": ["09", "10"],
         "test_speakers": ["03", "08"],
         "checkpoint_path": checkpoint_path or f"checkpoints/{tag}_best.pt",
-        "max_new_tokens": _max_new_tokens_for_prompt_type(prompt_type),
+        "max_new_tokens": max_new_tokens,
         "candidate_scoring": candidate_scoring,
+        "generate_evidence": generate_evidence,
     }
 
 
@@ -120,6 +131,70 @@ def extract_reasoning_blocks(text: str) -> tuple[str, str, bool]:
     format_valid = bool(think_text and answer_text)
 
     return think_text, answer_text, format_valid
+
+
+def extract_evidence_text(text: str) -> tuple[str, bool]:
+    evidence_match = re.search(
+        r"<evidence>(.*?)</evidence>",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    evidence_text = evidence_match.group(1).strip() if evidence_match else ""
+    format_valid = bool(
+        re.search(r"<evidence>", text, flags=re.IGNORECASE)
+        and re.search(r"</evidence>", text, flags=re.IGNORECASE)
+    )
+
+    return evidence_text, format_valid
+
+
+EVIDENCE_CUE_WORDS = {
+    "energy",
+    "pitch",
+    "rhythm",
+    "tempo",
+    "duration",
+    "activation",
+    "arousal",
+    "tense",
+    "subdued",
+    "expressive",
+}
+
+
+def mentions_evidence_cue(text: str) -> bool:
+    lowered = text.lower()
+    return any(word in lowered for word in EVIDENCE_CUE_WORDS)
+
+
+def extract_speaker_relative_cues(prompt: str) -> str:
+    match = re.search(
+        r"Speaker-relative acoustic cues:\s*(.*?)(?:\.\s*)?$",
+        prompt,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return match.group(1).strip() if match else ""
+
+
+def cue_faithfulness_ok(cue_text: str, evidence_text: str) -> bool:
+    cue_text = cue_text.lower()
+    evidence_text = evidence_text.lower()
+    contradiction_pairs = (
+        ("higher energy", "lower energy"),
+        ("lower energy", "higher energy"),
+        ("higher pitch", "lower pitch"),
+        ("lower pitch", "higher pitch"),
+        ("faster rhythm", "slower rhythm"),
+        ("slower rhythm", "faster rhythm"),
+        ("longer duration", "shorter duration"),
+        ("shorter duration", "longer duration"),
+    )
+
+    for cue_phrase, contradictory_phrase in contradiction_pairs:
+        if cue_phrase in cue_text and contradictory_phrase in evidence_text:
+            return False
+
+    return True
 
 
 def parse_generated_label(text: str, prompt_type: str) -> tuple[str | None, str, str, bool]:
@@ -344,6 +419,8 @@ def _structured_token_ids(tokenizer):
         "think_end": _single_token_id(tokenizer, "</think>"),
         "answer_start": _single_token_id(tokenizer, "<answer>"),
         "answer_end": _single_token_id(tokenizer, "</answer>"),
+        "evidence_start": _single_token_id(tokenizer, "<evidence>"),
+        "evidence_end": _single_token_id(tokenizer, "</evidence>"),
     }
 
 
@@ -381,6 +458,9 @@ def _allowed_answer_generation_tokens(
     answer_end_id = structured_ids["answer_end"]
 
     if answer_start_id is None or answer_end_id is None:
+        return None
+
+    if _contains_token(generated, answer_end_id):
         return None
 
     if not _contains_token(generated, answer_start_id):
@@ -421,6 +501,7 @@ def greedy_generate(
     audio_hidden,
     max_new_tokens: int = 5,
     prompt_type: str = "generation",
+    generate_evidence: bool = False,
 ):
     """
     Greedy decoding for a short emotion label.
@@ -458,6 +539,16 @@ def greedy_generate(
             if token_id is not None:
                 next_token_logits[:, token_id] = -float("inf")
 
+        if _contains_token(generated, structured_ids["answer_end"]):
+            token_id = structured_ids["answer_end"]
+            if token_id is not None:
+                next_token_logits[:, token_id] = -float("inf")
+
+        if _contains_token(generated, structured_ids["evidence_start"]):
+            token_id = structured_ids["evidence_start"]
+            if token_id is not None:
+                next_token_logits[:, token_id] = -float("inf")
+
         if _contains_token(generated, structured_ids["think_start"]):
             token_id = structured_ids["think_start"]
             if token_id is not None:
@@ -474,7 +565,10 @@ def greedy_generate(
 
         if next_token.item() == tokenizer.eos_token_id:
             break
-        if next_token.item() == structured_ids["answer_end"]:
+        if generate_evidence:
+            if next_token.item() == structured_ids["evidence_end"]:
+                break
+        elif next_token.item() == structured_ids["answer_end"]:
             break
 
     return generated
@@ -544,6 +638,10 @@ def evaluate(config):
     generated_full_texts = []
     sample_rows = []
     format_valid_flags = []
+    evidence_format_valid_flags = []
+    evidence_non_empty_flags = []
+    evidence_cue_mention_flags = []
+    evidence_faithfulness_flags = []
 
     print("\nGeneration evaluation configuration:")
     print(f"  Encoder:     {config['encoder']}")
@@ -551,6 +649,8 @@ def evaluate(config):
     print(f"  Device:      {device}")
     print(f"  Checkpoint:  {config['checkpoint_path']}")
     print(f"  Candidate scoring: {config['candidate_scoring']}")
+    print(f"  Generate evidence: {config['generate_evidence']}")
+    print(f"  Max new tokens: {config['max_new_tokens']}")
     print()
 
     for local_batch_idx, batch in enumerate(loader):
@@ -579,6 +679,7 @@ def evaluate(config):
             audio_hidden=audio_compressed,
             max_new_tokens=config["max_new_tokens"],
             prompt_type=config["prompt_type"],
+            generate_evidence=config["generate_evidence"],
         )
 
         full_text = tokenizer.decode(
@@ -597,6 +698,11 @@ def evaluate(config):
         )
 
         true_label = dataset.idx2label[int(class_label)]
+        cue_text = extract_speaker_relative_cues(prompt)
+        evidence_text, evidence_format_valid = extract_evidence_text(generated_text)
+        evidence_non_empty = bool(evidence_text.strip())
+        evidence_cue_mention = mentions_evidence_cue(evidence_text)
+        evidence_faithfulness = cue_faithfulness_ok(cue_text, evidence_text)
 
         y_true.append(true_label)
 
@@ -608,13 +714,23 @@ def evaluate(config):
         generated_answers.append(generated_text)
         generated_full_texts.append(full_text)
         format_valid_flags.append(format_valid)
+        evidence_format_valid_flags.append(evidence_format_valid)
+        evidence_non_empty_flags.append(evidence_non_empty)
+        evidence_cue_mention_flags.append(evidence_cue_mention)
+        evidence_faithfulness_flags.append(evidence_faithfulness)
         sample_rows.append({
             "prompt_type": config["prompt_type"],
             "true_label": true_label,
             "parsed_prediction": pred_label or "invalid",
+            "speaker_relative_cues": cue_text,
             "generated_text": generated_text,
             "think_text": think_text,
             "answer_text": extracted_answer_text,
+            "evidence_text": evidence_text,
+            "evidence_format_valid": evidence_format_valid,
+            "evidence_non_empty": evidence_non_empty,
+            "evidence_cue_mention": evidence_cue_mention,
+            "evidence_faithfulness_ok": evidence_faithfulness,
         })
 
     invalid_count = sum(1 for pred in y_pred if pred == "invalid")
@@ -624,12 +740,41 @@ def evaluate(config):
     _print_classification_metrics(y_true, y_pred)
     print(f"  Format validity:          {format_validity:.4f}")
 
+    if config["generate_evidence"]:
+        evidence_format_validity = sum(evidence_format_valid_flags) / max(
+            len(evidence_format_valid_flags),
+            1,
+        )
+        evidence_non_empty_rate = sum(evidence_non_empty_flags) / max(
+            len(evidence_non_empty_flags),
+            1,
+        )
+        evidence_cue_mention_rate = sum(evidence_cue_mention_flags) / max(
+            len(evidence_cue_mention_flags),
+            1,
+        )
+        evidence_faithfulness_rate = sum(evidence_faithfulness_flags) / max(
+            len(evidence_faithfulness_flags),
+            1,
+        )
+
+        print()
+        print("Evidence diagnostics:")
+        print(f"  Evidence format validity: {evidence_format_validity:.4f}")
+        print(f"  Evidence non-empty rate:  {evidence_non_empty_rate:.4f}")
+        print(f"  Cue mention rate:         {evidence_cue_mention_rate:.4f}")
+        print(f"  Cue faithfulness rate:    {evidence_faithfulness_rate:.4f}")
+
     print()
     print("Example generations:")
-    for i in range(min(10, len(generated_answers))):
+    example_count = 20 if config["generate_evidence"] else 10
+    for i in range(min(example_count, len(generated_answers))):
         print("-" * 80)
         print(f"True:      {y_true[i]}")
         print(f"Pred:      {y_pred[i]}")
+        if config["generate_evidence"]:
+            print(f"Cues:      {sample_rows[i]['speaker_relative_cues']}")
+            print(f"Evidence:  {sample_rows[i]['evidence_text']}")
         print(f"Generated: {generated_answers[i]}")
 
     os.makedirs("evaluation_outputs", exist_ok=True)
@@ -644,9 +789,15 @@ def evaluate(config):
                 "prompt_type",
                 "true_label",
                 "parsed_prediction",
+                "speaker_relative_cues",
                 "generated_text",
                 "think_text",
                 "answer_text",
+                "evidence_text",
+                "evidence_format_valid",
+                "evidence_non_empty",
+                "evidence_cue_mention",
+                "evidence_faithfulness_ok",
             ],
         )
         writer.writeheader()
@@ -715,6 +866,15 @@ if __name__ == "__main__":
         help="Optional candidate label likelihood scoring mode.",
     )
 
+    parser.add_argument(
+        "--generate_evidence",
+        action="store_true",
+        help=(
+            "For speaker_feature_answer_evidence_generation, continue decoding "
+            "after </answer> and evaluate generated evidence text."
+        ),
+    )
+
     args = parser.parse_args()
 
     config = _build_config(
@@ -722,6 +882,7 @@ if __name__ == "__main__":
         prompt_type=args.prompt_type,
         checkpoint_path=args.checkpoint_path,
         candidate_scoring=args.candidate_scoring,
+        generate_evidence=args.generate_evidence,
     )
 
     evaluate(config)
