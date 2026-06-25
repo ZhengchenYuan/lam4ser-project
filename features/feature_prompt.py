@@ -418,8 +418,19 @@ def _join_cues(cues) -> str:
 def get_speaker_id_from_path(path: str) -> str:
     """
     EmoDB filenames start with the speaker ID, e.g. 03a01Fa.wav.
+    AIBO filenames start with school and speaker ID, e.g. Mont_01_000_00.wav.
     """
-    return os.path.basename(str(path))[:2]
+    basename = os.path.splitext(os.path.basename(str(path)))[0]
+    if len(basename) < 2:
+        return "unknown"
+    if basename[0].isdigit():
+        return basename[:2]
+
+    parts = basename.split("_")
+    if len(parts) >= 2:
+        return f"{parts[0]}_{parts[1]}"
+
+    return basename[:2]
 
 
 def compute_speaker_feature_stats(acoustic_feature_cache, file_paths):

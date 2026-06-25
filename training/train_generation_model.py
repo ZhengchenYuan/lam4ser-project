@@ -9,6 +9,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
 from transformers import get_linear_schedule_with_warmup
 
+from data.dataset_configs import DATASET_CONFIGS, get_dataset_config
 from data.generation_dataset import EmoDBGenerationDataset
 from data.dataset import speaker_independent_split
 from data.tokenizer_utils import build_generation_tokenizer
@@ -39,6 +40,7 @@ def _max_length_for_prompt_type(prompt_type: str) -> int:
 
 def _build_config(
     encoder: str,
+    dataset: str = "emodb",
     prompt_type: str = "generation",
     lora_rank: int = 0,
     lora_lr: float = 1e-4,
@@ -46,14 +48,17 @@ def _build_config(
     answer_loss_weight: float = 5.0,
     evidence_loss_weight: float = 0.3,
 ) -> dict:
+    dataset_config = get_dataset_config(dataset)
     tag = f"{encoder}_{prompt_type}_generation"
 
     if lora_rank > 0:
         tag += f"_lora{lora_rank}"
 
-    os.makedirs("checkpoints", exist_ok=True)
+    checkpoint_dir = dataset_config["checkpoint_dir"]
+    os.makedirs(checkpoint_dir, exist_ok=True)
 
     return {
+        "dataset": dataset,
         "encoder": encoder,
         "prompt_type": prompt_type,
         "max_prompt_length": _max_length_for_prompt_type(prompt_type),
@@ -61,7 +66,10 @@ def _build_config(
         "lora_lr": lora_lr,
         "answer_loss_weight": answer_loss_weight,
         "evidence_loss_weight": evidence_loss_weight,
-        "embeddings_path": f"embeddings/{encoder}_embeddings.pt",
+        "embeddings_path": (
+            f"embeddings/{dataset_config['embeddings_prefix']}"
+            f"{encoder}_embeddings.pt"
+        ),
         "batch_size": 4,
         "lr": 1e-5,
         "epochs": epochs,
@@ -69,9 +77,10 @@ def _build_config(
         "dropout": 0.3,
         "target_audio_len": 50,
         "device": "cuda" if torch.cuda.is_available() else "cpu",
-        "val_speakers": ["09", "10"],
-        "test_speakers": ["03", "08"],
-        "checkpoint_path": f"checkpoints/{tag}_best.pt",
+        "val_speakers": dataset_config["val_speakers"],
+        "test_speakers": dataset_config["test_speakers"],
+        "checkpoint_path": f"{checkpoint_dir}/{tag}_best.pt",
+        "preprocessing_script": dataset_config["preprocessing_script"],
     }
 
 
@@ -106,7 +115,7 @@ def train(config):
     if not os.path.exists(config["embeddings_path"]):
         print(
             f"ERROR: '{config['embeddings_path']}' not found. "
-            "Run models/audio_encoder/preprocessing.py first to generate the embeddings file."
+            f"Run {config['preprocessing_script']} first to generate the embeddings file."
         )
         sys.exit(1)
 
@@ -204,6 +213,7 @@ def train(config):
     best_val_loss = float("inf")
 
     print("\nGeneration training configuration:")
+    print(f"  Dataset:      {config['dataset']}")
     print(f"  Encoder:      {config['encoder']}")
     print(f"  Prompt type:  {config['prompt_type']}")
     print(f"  Prompt length:{config['max_prompt_length']}")
@@ -277,6 +287,7 @@ def train(config):
             torch.save(
                 {
                     "epoch": epoch,
+                    "dataset": config["dataset"],
                     "encoder": config["encoder"],
                     "prompt_type": config["prompt_type"],
                     "max_prompt_length": config["max_prompt_length"],
@@ -366,6 +377,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
+        "--dataset",
+        default="emodb",
+        choices=list(DATASET_CONFIGS),
+        help="Which dataset's embeddings and speaker split to use.",
+    )
+
+    parser.add_argument(
         "--encoder",
         default="wavlm-large",
         choices=[
@@ -429,6 +447,7 @@ if __name__ == "__main__":
 
     config = _build_config(
         encoder=args.encoder,
+        dataset=args.dataset,
         prompt_type=args.prompt_type,
         lora_rank=args.lora_rank,
         lora_lr=args.lora_lr,

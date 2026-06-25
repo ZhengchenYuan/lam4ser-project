@@ -14,9 +14,17 @@ from features.feature_prompt import (
 
 
 def extract_speaker_id(file_path: str) -> str:
-    basename = os.path.basename(file_path)
+    basename = os.path.splitext(os.path.basename(file_path))[0]
     if len(basename) < 2:
         return "unknown"
+
+    if basename[0].isdigit():
+        return basename[:2]
+
+    parts = basename.split("_")
+    if len(parts) >= 2:
+        return f"{parts[0]}_{parts[1]}"
+
     return basename[:2]
 
 
@@ -150,6 +158,7 @@ class EmoDBFusionDataset(Dataset):
         #   self.input_ids_list[idx] can be different for each sample,
         #   especially for acoustic feature prompts.
         # ------------------------------------------------------------
+        self.label_names = [self.idx2label[i] for i in range(len(self.idx2label))]
         self.input_ids_list = []
 
         for idx in range(len(self.embeddings)):
@@ -193,9 +202,13 @@ class EmoDBFusionDataset(Dataset):
             else:
                 feature_text = acoustic_features_to_text(features)
 
-            return get_prompt(self.prompt_type, features=feature_text)
+            return get_prompt(
+                self.prompt_type,
+                features=feature_text,
+                labels=self.label_names,
+            )
 
-        return get_prompt(self.prompt_type)
+        return get_prompt(self.prompt_type, labels=self.label_names)
 
     def __len__(self):
         return len(self.embeddings)

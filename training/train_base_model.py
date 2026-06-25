@@ -13,6 +13,7 @@ from sklearn.metrics import f1_score, confusion_matrix
 from sklearn.utils.class_weight import compute_class_weight
 import matplotlib.pyplot as plt
 
+from data.dataset_configs import DATASET_CONFIGS, get_dataset_config
 from data.dataset import EmoDBFusionDataset, speaker_independent_split
 from models.compression.compressor import AudioCompressor
 from models.audio_gpt2 import AudioGPT2
@@ -20,24 +21,31 @@ from models.audio_gpt2 import AudioGPT2
 
 def _build_config(
     encoder: str,
+    dataset: str = "emodb",
     lora_rank: int = 0,
     lora_lr: float = 1e-4,
     prompt_type: str = "base",
 ) -> dict:
+    dataset_config = get_dataset_config(dataset)
     tag = f"{encoder}_{prompt_type}"
 
     if lora_rank > 0:
         tag += f"_lora{lora_rank}"
 
-    os.makedirs("checkpoints", exist_ok=True)
+    checkpoint_dir = dataset_config["checkpoint_dir"]
+    os.makedirs(checkpoint_dir, exist_ok=True)
 
     return {
+        "dataset": dataset,
         "encoder": encoder,
         "prompt_type": prompt_type,
         "max_prompt_length": 64 if "feature" in prompt_type else 32,
         "lora_rank": lora_rank,
         "lora_lr": lora_lr,
-        "embeddings_path": f"embeddings/{encoder}_embeddings.pt",
+        "embeddings_path": (
+            f"embeddings/{dataset_config['embeddings_prefix']}"
+            f"{encoder}_embeddings.pt"
+        ),
         "batch_size": 4,
         "lr": 1e-5,
         "epochs": 100,
@@ -45,10 +53,12 @@ def _build_config(
         "dropout": 0.3,
         "target_audio_len": 50,
         "device": "cuda" if torch.cuda.is_available() else "cpu",
-        "val_speakers": ["09", "10"],
-        "test_speakers": ["03", "08"],
-        "checkpoint_path": f"checkpoints/{tag}_best.pt",
-        "loss_curve_path": f"checkpoints/{tag}_loss_curve.png",
+        "val_speakers": dataset_config["val_speakers"],
+        "test_speakers": dataset_config["test_speakers"],
+        "checkpoint_path": f"{checkpoint_dir}/{tag}_best.pt",
+        "loss_curve_path": f"{checkpoint_dir}/{tag}_loss_curve.png",
+        "preprocessing_script": dataset_config["preprocessing_script"],
+        "num_classes": len(dataset_config["labels"]),
     }
 
 
@@ -60,7 +70,7 @@ def smoke_test(config):
     audio = torch.randn(2, 50, audio_dim)
 
     model = AudioGPT2(
-        num_classes=7,
+        num_classes=config["num_classes"],
         audio_dim=audio_dim,
         adapter_dim=config["adapter_dim"],
         dropout=config["dropout"],
@@ -69,7 +79,10 @@ def smoke_test(config):
 
     logits = model(input_ids, audio)
 
-    assert logits.shape == (2, 7), f"Expected logits shape (2, 7), got {logits.shape}"
+    expected_shape = (2, config["num_classes"])
+    assert logits.shape == expected_shape, (
+        f"Expected logits shape {expected_shape}, got {logits.shape}"
+    )
 
     print("✓ Smoke test passed")
 
@@ -78,7 +91,7 @@ def train(config):
     if not os.path.exists(config["embeddings_path"]):
         print(
             f"ERROR: '{config['embeddings_path']}' not found. "
-            "Run models/audio_encoder/preprocessing.py first to generate the embeddings file."
+            f"Run {config['preprocessing_script']} first to generate the embeddings file."
         )
         sys.exit(1)
 
@@ -182,6 +195,7 @@ def train(config):
     best_val_loss = float("inf")
 
     print("\nTraining configuration:")
+    print(f"  Dataset:      {config['dataset']}")
     print(f"  Encoder:      {config['encoder']}")
     print(f"  Prompt type:  {config['prompt_type']}")
     print(f"  Prompt length:{config['max_prompt_length']}")
@@ -255,6 +269,7 @@ def train(config):
             torch.save(
                 {
                     "epoch": epoch,
+                    "dataset": config["dataset"],
                     "encoder": config["encoder"],
                     "prompt_type": config["prompt_type"],
                     "max_prompt_length": config["max_prompt_length"],
@@ -332,6 +347,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
+        "--dataset",
+        default="emodb",
+        choices=list(DATASET_CONFIGS),
+        help="Which dataset's embeddings and speaker split to use.",
+    )
+
+    parser.add_argument(
         "--encoder",
         default="wav2vec2-base",
         choices=[
@@ -373,6 +395,7 @@ if __name__ == "__main__":
 
     config = _build_config(
         args.encoder,
+        dataset=args.dataset,
         lora_rank=args.lora_rank,
         lora_lr=args.lora_lr,
         prompt_type=args.prompt_type,

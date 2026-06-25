@@ -12,9 +12,10 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
 from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix
 
+from data.dataset_configs import DATASET_CONFIGS, get_dataset_config
 from data.generation_dataset import EmoDBGenerationDataset
 from data.dataset import speaker_independent_split
-from data.prompts import LABELS
+from data.prompts import LABELS as DEFAULT_LABELS
 from data.tokenizer_utils import build_generation_tokenizer
 from models.compression.compressor import AudioCompressor
 from models.audio_gpt2_generation import AudioGPT2Generation
@@ -70,10 +71,12 @@ def _max_new_tokens_for_prompt_type(prompt_type: str) -> int:
 def _build_config(
     encoder: str,
     prompt_type: str,
+    dataset: str = "emodb",
     checkpoint_path: str | None = None,
     candidate_scoring: str = "none",
     generate_evidence: bool = False,
 ) -> dict:
+    dataset_config = get_dataset_config(dataset)
     tag = f"{encoder}_{prompt_type}_generation"
     max_new_tokens = _max_new_tokens_for_prompt_type(prompt_type)
 
@@ -86,25 +89,33 @@ def _build_config(
         max_new_tokens = 64
 
     return {
+        "dataset": dataset,
         "encoder": encoder,
         "prompt_type": prompt_type,
         "max_prompt_length": _max_length_for_prompt_type(prompt_type),
-        "embeddings_path": f"embeddings/{encoder}_embeddings.pt",
+        "embeddings_path": (
+            f"embeddings/{dataset_config['embeddings_prefix']}"
+            f"{encoder}_embeddings.pt"
+        ),
         "batch_size": 1,
         "adapter_dim": 64,
         "dropout": 0.3,
         "target_audio_len": 50,
         "device": "cuda" if torch.cuda.is_available() else "cpu",
-        "val_speakers": ["09", "10"],
-        "test_speakers": ["03", "08"],
-        "checkpoint_path": checkpoint_path or f"checkpoints/{tag}_best.pt",
+        "val_speakers": dataset_config["val_speakers"],
+        "test_speakers": dataset_config["test_speakers"],
+        "checkpoint_path": (
+            checkpoint_path
+            or f"{dataset_config['checkpoint_dir']}/{tag}_best.pt"
+        ),
         "max_new_tokens": max_new_tokens,
         "candidate_scoring": candidate_scoring,
         "generate_evidence": generate_evidence,
+        "preprocessing_script": dataset_config["preprocessing_script"],
     }
 
 
-def normalize_generated_label(text: str) -> str | None:
+def normalize_generated_label(text: str, labels: list[str]) -> str | None:
     """
     Map generated text back to one of the emotion labels.
 
@@ -115,7 +126,7 @@ def normalize_generated_label(text: str) -> str | None:
     """
     text = text.lower().strip()
 
-    for label in LABELS:
+    for label in labels:
         if label in text:
             return label
 
@@ -197,16 +208,20 @@ def cue_faithfulness_ok(cue_text: str, evidence_text: str) -> bool:
     return True
 
 
-def parse_generated_label(text: str, prompt_type: str) -> tuple[str | None, str, str, bool]:
+def parse_generated_label(
+    text: str,
+    prompt_type: str,
+    labels: list[str],
+) -> tuple[str | None, str, str, bool]:
     think_text, answer_text, format_valid = extract_reasoning_blocks(text)
 
     if prompt_type in ANSWER_TAG_PROMPT_TYPES and answer_text:
-        pred_label = normalize_generated_label(answer_text)
+        pred_label = normalize_generated_label(answer_text, labels)
     else:
-        pred_label = normalize_generated_label(text)
+        pred_label = normalize_generated_label(text, labels)
 
     if pred_label is None and answer_text:
-        pred_label = normalize_generated_label(answer_text)
+        pred_label = normalize_generated_label(answer_text, labels)
 
     if prompt_type in LABEL_CONSTRAINED_PROMPT_TYPES:
         format_valid = bool(answer_text)
@@ -292,6 +307,7 @@ def evaluate_candidate_scoring(
     loader,
     config,
     mode: str,
+    label_names: list[str],
 ):
     y_true = []
     y_pred = []
@@ -314,7 +330,7 @@ def evaluate_candidate_scoring(
         )
         prompt_len = prompt_encoded["input_ids"].shape[1]
 
-        for label in LABELS:
+        for label in label_names:
             target = build_candidate_target(dataset, original_idx, label, mode)
             full_text = prompt + target
 
@@ -347,11 +363,11 @@ def evaluate_candidate_scoring(
 
     print()
     print(f"Candidate-scoring results ({mode}):")
-    _print_classification_metrics(y_true, y_pred)
+    _print_classification_metrics(y_true, y_pred, label_names)
 
 
-def _print_classification_metrics(y_true, y_pred):
-    all_eval_labels = LABELS + ["invalid"]
+def _print_classification_metrics(y_true, y_pred, label_names: list[str]):
+    all_eval_labels = label_names + ["invalid"]
 
     acc = accuracy_score(y_true, y_pred)
     weighted_f1 = f1_score(
@@ -372,12 +388,12 @@ def _print_classification_metrics(y_true, y_pred):
     per_class_f1 = f1_score(
         y_true,
         y_pred,
-        labels=LABELS,
+        labels=label_names,
         average=None,
         zero_division=0,
     )
     print("Per-class F1:")
-    for label, score in zip(LABELS, per_class_f1):
+    for label, score in zip(label_names, per_class_f1):
         print(f"  {label}: {score:.4f}")
     print()
 
@@ -430,10 +446,10 @@ def _contains_token(input_ids, token_id: int | None) -> bool:
     return bool(input_ids.eq(token_id).any().item())
 
 
-def _label_token_sequences(tokenizer):
+def _label_token_sequences(tokenizer, label_names: list[str]):
     return {
         label: tokenizer.encode(label, add_special_tokens=False)
-        for label in LABELS
+        for label in label_names
     }
 
 
@@ -502,6 +518,7 @@ def greedy_generate(
     max_new_tokens: int = 5,
     prompt_type: str = "generation",
     generate_evidence: bool = False,
+    label_names: list[str] | None = None,
 ):
     """
     Greedy decoding for a short emotion label.
@@ -520,7 +537,7 @@ def greedy_generate(
 
     generated = input_ids
     structured_ids = _structured_token_ids(tokenizer)
-    label_sequences = _label_token_sequences(tokenizer)
+    label_sequences = _label_token_sequences(tokenizer, label_names or DEFAULT_LABELS)
 
     for _ in range(max_new_tokens):
         logits = model(generated, audio_hidden)
@@ -587,7 +604,10 @@ def evaluate(config):
         raise FileNotFoundError(f"Checkpoint not found: {config['checkpoint_path']}")
 
     if not os.path.exists(config["embeddings_path"]):
-        raise FileNotFoundError(f"Embeddings file not found: {config['embeddings_path']}")
+        raise FileNotFoundError(
+            f"Embeddings file not found: {config['embeddings_path']}. "
+            f"Run {config['preprocessing_script']} first."
+        )
 
     device = config["device"]
 
@@ -608,6 +628,7 @@ def evaluate(config):
         prompt_type=config["prompt_type"],
         max_length=config["max_prompt_length"],
     )
+    label_names = [dataset.idx2label[i] for i in range(len(dataset.idx2label))]
 
     _, _, test_idx = speaker_independent_split(
         dataset,
@@ -652,6 +673,7 @@ def evaluate(config):
     evidence_faithfulness_flags = []
 
     print("\nGeneration evaluation configuration:")
+    print(f"  Dataset:     {config['dataset']}")
     print(f"  Encoder:     {config['encoder']}")
     print(f"  Prompt type: {config['prompt_type']}")
     print(f"  Device:      {device}")
@@ -688,6 +710,7 @@ def evaluate(config):
             max_new_tokens=config["max_new_tokens"],
             prompt_type=config["prompt_type"],
             generate_evidence=config["generate_evidence"],
+            label_names=label_names,
         )
 
         full_text = tokenizer.decode(
@@ -703,6 +726,7 @@ def evaluate(config):
         pred_label, think_text, extracted_answer_text, format_valid = parse_generated_label(
             generated_text,
             config["prompt_type"],
+            label_names,
         )
 
         true_label = dataset.idx2label[int(class_label)]
@@ -745,7 +769,7 @@ def evaluate(config):
     format_validity = sum(format_valid_flags) / max(len(format_valid_flags), 1)
 
     print("Free-generation results:")
-    _print_classification_metrics(y_true, y_pred)
+    _print_classification_metrics(y_true, y_pred, label_names)
     print(f"  Format validity:          {format_validity:.4f}")
 
     if config["generate_evidence"]:
@@ -824,6 +848,7 @@ def evaluate(config):
             loader=loader,
             config=config,
             mode="answer",
+            label_names=label_names,
         )
 
     if config["candidate_scoring"] in ("full_target", "both"):
@@ -836,11 +861,19 @@ def evaluate(config):
             loader=loader,
             config=config,
             mode="full_target",
+            label_names=label_names,
         )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--dataset",
+        default="emodb",
+        choices=list(DATASET_CONFIGS),
+        help="Which dataset's embeddings, labels, and speaker split to use.",
+    )
 
     parser.add_argument(
         "--encoder",
@@ -887,6 +920,7 @@ if __name__ == "__main__":
 
     config = _build_config(
         encoder=args.encoder,
+        dataset=args.dataset,
         prompt_type=args.prompt_type,
         checkpoint_path=args.checkpoint_path,
         candidate_scoring=args.candidate_scoring,

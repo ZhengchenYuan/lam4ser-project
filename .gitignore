@@ -1,5 +1,6 @@
 # Python
 __pycache__/
+.pytest_cache/
 *.pyc
 *.pyo
 .venv/
@@ -12,8 +13,14 @@ __pycache__/
 data/*.wav
 data/*.pt
 embeddings/
+checkpoints/
+checkpoints_AIBO/
+evaluation_outputs/
 *.pt
 loss_curve.png
+
+# Local reference checkouts
+/:Users:kai:Documents:GitHub:wieb-lam4ser-feature/
 
 # SLURM logs
 *.out

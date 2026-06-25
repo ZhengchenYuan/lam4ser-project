@@ -6,7 +6,7 @@ This file centralizes all prompt variants used by both:
 2. autoregressive label generation
 """
 
-LABELS = [
+EMODB_LABELS = [
     "anger",
     "boredom",
     "disgust",
@@ -16,7 +16,16 @@ LABELS = [
     "sadness",
 ]
 
+AIBO_LABELS = [
+    "anger",
+    "emphatic",
+    "neutral",
+    "positive",
+    "rest",
+]
 
+
+LABELS = EMODB_LABELS
 LABEL_TEXT = ", ".join(LABELS)
 
 
@@ -27,31 +36,31 @@ PROMPTS = {
 
     "label_list": (
         "Classify the emotion of this speech. "
-        f"Possible labels are {LABEL_TEXT}."
+        "Possible labels are {label_text}."
     ),
 
     "feature": (
         "Classify the emotion of this speech. "
         "Acoustic features: {features}. "
-        f"Possible labels are {LABEL_TEXT}."
+        "Possible labels are {label_text}."
     ),
 
     "feature_speaker": (
         "Classify the emotion of this speech. "
         "Acoustic features: {features}. "
-        f"Possible labels are {LABEL_TEXT}."
+        "Possible labels are {label_text}."
     ),
 
     "generation": (
         "Classify the emotion of this speech. "
-        f"Possible labels are {LABEL_TEXT}. "
+        "Possible labels are {label_text}. "
         "Answer with one label only:"
     ),
 
     "feature_generation": (
         "Classify the emotion of this speech. "
         "Acoustic features: {features}. "
-        f"Possible labels are {LABEL_TEXT}. "
+        "Possible labels are {label_text}. "
         "Answer with one label only:"
     ),
 
@@ -88,7 +97,11 @@ PROMPTS = {
 }
 
 
-def get_prompt(prompt_type: str, features: str | None = None) -> str:
+def get_prompt(
+    prompt_type: str,
+    features: str | None = None,
+    labels: list[str] | None = None,
+) -> str:
     """
     Build a prompt string from the selected prompt type.
 
@@ -113,6 +126,10 @@ def get_prompt(prompt_type: str, features: str | None = None) -> str:
             Textual acoustic feature description, for example:
             "high pitch, high energy, short duration"
 
+        labels:
+            Optional dataset-specific labels to list in prompts. Defaults to
+            EMoDB labels for backwards compatibility.
+
     Returns:
         Prompt string.
     """
@@ -124,12 +141,15 @@ def get_prompt(prompt_type: str, features: str | None = None) -> str:
 
     template = PROMPTS[prompt_type]
 
-    if "{features}" in template:
+    label_text = ", ".join(labels if labels is not None else LABELS)
+    text = template.replace("{label_text}", label_text)
+
+    if "{features}" in text:
         if features is None:
             raise ValueError(
                 f"Prompt type '{prompt_type}' requires acoustic feature text, "
                 "but features=None was provided."
             )
-        return template.format(features=features)
+        text = text.format(features=features)
 
-    return template
+    return text
