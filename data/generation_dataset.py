@@ -80,6 +80,8 @@ class EmoDBGenerationDataset(Dataset):
         embeddings_path: str,
         prompt_type: str = "generation",
         max_length: int = 96,
+        answer_loss_weight: float = 5.0,
+        evidence_loss_weight: float = 0.3,
     ):
         if not os.path.exists(embeddings_path):
             print(
@@ -98,6 +100,8 @@ class EmoDBGenerationDataset(Dataset):
         self.embeddings_path = embeddings_path
         self.prompt_type = prompt_type
         self.max_length = max_length
+        self.answer_loss_weight = answer_loss_weight
+        self.evidence_loss_weight = evidence_loss_weight
         self.use_feature_prompt = "feature" in prompt_type
         self.use_answer_tag_target = prompt_type in ANSWER_TAG_PROMPT_TYPES
         self.use_caption_target = prompt_type in CAPTION_TARGET_PROMPT_TYPES
@@ -186,12 +190,14 @@ class EmoDBGenerationDataset(Dataset):
 
         self.input_ids_list = []
         self.lm_labels_list = []
+        self.loss_weights_list = []
         self.class_labels_list = []
 
         for idx in range(len(self.sample_indices)):
-            input_ids, lm_labels = self._build_generation_sample(idx)
+            input_ids, lm_labels, loss_weights = self._build_generation_sample(idx)
             self.input_ids_list.append(input_ids)
             self.lm_labels_list.append(lm_labels)
+            self.loss_weights_list.append(loss_weights)
             self.class_labels_list.append(
                 torch.tensor(self.labels[self.sample_indices[idx]], dtype=torch.long)
             )
@@ -391,7 +397,74 @@ class EmoDBGenerationDataset(Dataset):
         lm_labels[:prompt_len] = -100
         lm_labels[input_ids == self.tokenizer.pad_token_id] = -100
 
-        return input_ids, lm_labels
+        loss_weights = None
+
+        if self.prompt_type == "speaker_feature_answer_evidence_generation":
+            loss_weights = self._build_answer_evidence_loss_weights(
+                prompt_len=prompt_len,
+                target=target,
+                input_ids=input_ids,
+            )
+
+        return input_ids, lm_labels, loss_weights
+
+    def _encode_target_piece(self, text: str) -> list[int]:
+        return self.tokenizer.encode(text, add_special_tokens=False)
+
+    def _build_answer_evidence_loss_weights(
+        self,
+        prompt_len: int,
+        target: str,
+        input_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Build target-token weights for answer+evidence generation.
+
+        The full answer span, including answer tags, receives a high weight so
+        the model keeps learning the classification answer. The evidence span,
+        including evidence tags, receives a low weight so it remains trainable
+        without dominating the LM objective.
+        """
+        answer_start = target.index("<answer>")
+        answer_end = target.index("</answer>") + len("</answer>")
+        evidence_start = target.index("<evidence>")
+        evidence_end = target.index("</evidence>") + len("</evidence>")
+
+        target_token_weights = []
+        cursor = 0
+
+        for span_start, span_end, span_weight in (
+            (answer_start, answer_end, self.answer_loss_weight),
+            (evidence_start, evidence_end, self.evidence_loss_weight),
+        ):
+            if cursor < span_start:
+                target_token_weights.extend(
+                    [1.0] * len(self._encode_target_piece(target[cursor:span_start]))
+                )
+
+            target_token_weights.extend(
+                [span_weight] * len(self._encode_target_piece(target[span_start:span_end]))
+            )
+            cursor = span_end
+
+        if cursor < len(target):
+            target_token_weights.extend(
+                [1.0] * len(self._encode_target_piece(target[cursor:]))
+            )
+
+        loss_weights = torch.ones_like(input_ids, dtype=torch.float)
+        available_target_len = max(0, input_ids.numel() - prompt_len)
+        target_weight_len = min(len(target_token_weights), available_target_len)
+
+        if target_weight_len > 0:
+            loss_weights[prompt_len:prompt_len + target_weight_len] = torch.tensor(
+                target_token_weights[:target_weight_len],
+                dtype=torch.float,
+            )
+
+        loss_weights[input_ids == self.tokenizer.pad_token_id] = 0.0
+
+        return loss_weights
 
     def __len__(self):
         return len(self.sample_indices)
@@ -399,9 +472,14 @@ class EmoDBGenerationDataset(Dataset):
     def __getitem__(self, idx):
         real_idx = self.sample_indices[idx]
 
-        return {
+        item = {
             "input_ids": self.input_ids_list[idx],
             "labels": self.lm_labels_list[idx],
             "audio": self.embeddings[real_idx],
             "class_label": self.class_labels_list[idx],
         }
+
+        if self.loss_weights_list[idx] is not None:
+            item["loss_weights"] = self.loss_weights_list[idx]
+
+        return item

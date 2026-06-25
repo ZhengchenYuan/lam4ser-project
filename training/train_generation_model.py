@@ -43,6 +43,8 @@ def _build_config(
     lora_rank: int = 0,
     lora_lr: float = 1e-4,
     epochs: int = 100,
+    answer_loss_weight: float = 5.0,
+    evidence_loss_weight: float = 0.3,
 ) -> dict:
     tag = f"{encoder}_{prompt_type}_generation"
 
@@ -57,6 +59,8 @@ def _build_config(
         "max_prompt_length": _max_length_for_prompt_type(prompt_type),
         "lora_rank": lora_rank,
         "lora_lr": lora_lr,
+        "answer_loss_weight": answer_loss_weight,
+        "evidence_loss_weight": evidence_loss_weight,
         "embeddings_path": f"embeddings/{encoder}_embeddings.pt",
         "batch_size": 4,
         "lr": 1e-5,
@@ -110,6 +114,8 @@ def train(config):
         embeddings_path=config["embeddings_path"],
         prompt_type=config["prompt_type"],
         max_length=config["max_prompt_length"],
+        answer_loss_weight=config["answer_loss_weight"],
+        evidence_loss_weight=config["evidence_loss_weight"],
     )
 
     train_idx, val_idx, test_idx = speaker_independent_split(
@@ -150,7 +156,11 @@ def train(config):
     ).to(device)
     model.configure_tokenizer_vocab(len(dataset.tokenizer))
 
-    criterion = nn.CrossEntropyLoss(ignore_index=-100)
+    use_loss_weights = config["prompt_type"] == "speaker_feature_answer_evidence_generation"
+    criterion = nn.CrossEntropyLoss(
+        ignore_index=-100,
+        reduction="none" if use_loss_weights else "mean",
+    )
 
     trainable_params = [p for p in model.parameters() if p.requires_grad]
 
@@ -198,6 +208,9 @@ def train(config):
     print(f"  Prompt type:  {config['prompt_type']}")
     print(f"  Prompt length:{config['max_prompt_length']}")
     print(f"  LoRA rank:    {config['lora_rank']}")
+    if use_loss_weights:
+        print(f"  Answer weight:{config['answer_loss_weight']}")
+        print(f"  Evidence wt:  {config['evidence_loss_weight']}")
     print(f"  Device:       {device}")
     print(f"  Checkpoint:   {config['checkpoint_path']}")
     print()
@@ -209,13 +222,16 @@ def train(config):
         for batch in train_loader:
             input_ids = batch["input_ids"].to(device)
             labels = batch["labels"].to(device)
+            loss_weights = batch.get("loss_weights")
+            if loss_weights is not None:
+                loss_weights = loss_weights.to(device)
             audio = batch["audio"].to(device)
 
             audio_compressed = compressor(audio)
 
             logits = model(input_ids, audio_compressed)
 
-            loss = language_model_loss(logits, labels, criterion)
+            loss = language_model_loss(logits, labels, criterion, loss_weights)
 
             optimizer.zero_grad()
             loss.backward()
@@ -234,13 +250,16 @@ def train(config):
             for batch in val_loader:
                 input_ids = batch["input_ids"].to(device)
                 labels = batch["labels"].to(device)
+                loss_weights = batch.get("loss_weights")
+                if loss_weights is not None:
+                    loss_weights = loss_weights.to(device)
                 audio = batch["audio"].to(device)
 
                 audio_compressed = compressor(audio)
 
                 logits = model(input_ids, audio_compressed)
 
-                loss = language_model_loss(logits, labels, criterion)
+                loss = language_model_loss(logits, labels, criterion, loss_weights)
 
                 epoch_val_loss += loss.item()
 
@@ -301,20 +320,23 @@ def evaluate_loss(model, compressor, loader, criterion, device):
         for batch in loader:
             input_ids = batch["input_ids"].to(device)
             labels = batch["labels"].to(device)
+            loss_weights = batch.get("loss_weights")
+            if loss_weights is not None:
+                loss_weights = loss_weights.to(device)
             audio = batch["audio"].to(device)
 
             audio_compressed = compressor(audio)
 
             logits = model(input_ids, audio_compressed)
 
-            loss = language_model_loss(logits, labels, criterion)
+            loss = language_model_loss(logits, labels, criterion, loss_weights)
 
             total_loss += loss.item()
 
     return total_loss / len(loader)
 
 
-def language_model_loss(logits, labels, criterion):
+def language_model_loss(logits, labels, criterion, loss_weights=None):
     """
     Decoder-only LM loss: token t predicts token t+1.
 
@@ -325,10 +347,19 @@ def language_model_loss(logits, labels, criterion):
     shift_logits = logits[:, :-1, :].contiguous()
     shift_labels = labels[:, 1:].contiguous()
 
-    return criterion(
+    token_loss = criterion(
         shift_logits.view(-1, shift_logits.size(-1)),
         shift_labels.view(-1),
     )
+
+    if loss_weights is None:
+        return token_loss
+
+    shift_weights = loss_weights[:, 1:].contiguous().view(-1)
+    active = shift_labels.view(-1) != -100
+    active_weights = shift_weights * active.float()
+
+    return (token_loss * active_weights).sum() / active_weights.sum().clamp_min(1e-8)
 
 
 if __name__ == "__main__":
@@ -374,6 +405,26 @@ if __name__ == "__main__":
         help="Learning rate for LoRA parameters.",
     )
 
+    parser.add_argument(
+        "--answer_loss_weight",
+        type=float,
+        default=5.0,
+        help=(
+            "Loss weight for the answer span in "
+            "speaker_feature_answer_evidence_generation."
+        ),
+    )
+
+    parser.add_argument(
+        "--evidence_loss_weight",
+        type=float,
+        default=0.3,
+        help=(
+            "Loss weight for the evidence span in "
+            "speaker_feature_answer_evidence_generation."
+        ),
+    )
+
     args = parser.parse_args()
 
     config = _build_config(
@@ -382,6 +433,8 @@ if __name__ == "__main__":
         lora_rank=args.lora_rank,
         lora_lr=args.lora_lr,
         epochs=args.epochs,
+        answer_loss_weight=args.answer_loss_weight,
+        evidence_loss_weight=args.evidence_loss_weight,
     )
 
     smoke_test(config)
