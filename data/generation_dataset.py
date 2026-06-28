@@ -202,13 +202,17 @@ class EmoDBGenerationDataset(Dataset):
         self.input_ids_list = []
         self.lm_labels_list = []
         self.loss_weights_list = []
+        self.answer_loss_masks_list = []
         self.class_labels_list = []
 
         for idx in range(len(self.sample_indices)):
-            input_ids, lm_labels, loss_weights = self._build_generation_sample(idx)
+            input_ids, lm_labels, loss_weights, answer_loss_mask = (
+                self._build_generation_sample(idx)
+            )
             self.input_ids_list.append(input_ids)
             self.lm_labels_list.append(lm_labels)
             self.loss_weights_list.append(loss_weights)
+            self.answer_loss_masks_list.append(answer_loss_mask)
             self.class_labels_list.append(
                 torch.tensor(self.labels[self.sample_indices[idx]], dtype=torch.long)
             )
@@ -421,10 +425,52 @@ class EmoDBGenerationDataset(Dataset):
                 input_ids=input_ids,
             )
 
-        return input_ids, lm_labels, loss_weights
+        answer_loss_mask = None
+        if "<answer>" in target and "</answer>" in target:
+            answer_loss_mask = self._build_answer_loss_mask(
+                prompt_len=prompt_len,
+                target=target,
+                input_ids=input_ids,
+            )
+
+        return input_ids, lm_labels, loss_weights, answer_loss_mask
 
     def _encode_target_piece(self, text: str) -> list[int]:
         return self.tokenizer.encode(text, add_special_tokens=False)
+
+    def _build_answer_loss_mask(
+        self,
+        prompt_len: int,
+        target: str,
+        input_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Mark answer-label target tokens for optional class-balanced loss.
+
+        The mask covers the content between <answer> and </answer>, not the
+        structural tags. Prompt and padding positions stay inactive.
+        """
+        answer_content_start = target.index("<answer>") + len("<answer>")
+        answer_content_end = target.index("</answer>")
+
+        prefix_len = len(self._encode_target_piece(target[:answer_content_start]))
+        answer_len = len(
+            self._encode_target_piece(
+                target[answer_content_start:answer_content_end]
+            )
+        )
+
+        answer_loss_mask = torch.zeros_like(input_ids, dtype=torch.float)
+        available_target_len = max(0, input_ids.numel() - prompt_len)
+        answer_start = prompt_len + prefix_len
+        answer_end = min(answer_start + answer_len, prompt_len + available_target_len)
+
+        if answer_start < answer_end:
+            answer_loss_mask[answer_start:answer_end] = 1.0
+
+        answer_loss_mask[input_ids == self.tokenizer.pad_token_id] = 0.0
+
+        return answer_loss_mask
 
     def _build_answer_evidence_loss_weights(
         self,
@@ -496,5 +542,8 @@ class EmoDBGenerationDataset(Dataset):
 
         if self.loss_weights_list[idx] is not None:
             item["loss_weights"] = self.loss_weights_list[idx]
+
+        if self.answer_loss_masks_list[idx] is not None:
+            item["answer_loss_mask"] = self.answer_loss_masks_list[idx]
 
         return item

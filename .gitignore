@@ -16,6 +16,7 @@ embeddings/
 checkpoints/
 checkpoints_AIBO/
 evaluation_outputs/
+logs/
 *.pt
 loss_curve.png
 
