@@ -27,6 +27,7 @@ GENERATION_PROMPT_TYPES = [
     "reasoning_generation_global",
     "speaker_reasoning_generation",
     "speaker_reasoning_generation_answer_first",
+    "speaker_acoustic_cue_generation",
 ]
 
 STRUCTURED_ANSWER_PROMPT_TYPES = {
@@ -41,6 +42,8 @@ STRUCTURED_ANSWER_PROMPT_TYPES = {
 
 
 def _max_length_for_prompt_type(prompt_type: str) -> int:
+    if prompt_type == "speaker_acoustic_cue_generation":
+        return 128
     if "reasoning_generation" in prompt_type:
         return 224
     if "feature" in prompt_type:
@@ -58,8 +61,10 @@ def _build_config(
     answer_loss_weight: float = 5.0,
     evidence_loss_weight: float = 0.3,
     class_weighted_answer_loss: bool = False,
+    class_weight_mode: str = "balanced",
     class_weight_power: float = 1.0,
     class_weight_max: float = 5.0,
+    no_audio: bool = False,
 ) -> dict:
     dataset_config = get_dataset_config(dataset)
     tag = f"{encoder}_{prompt_type}_generation"
@@ -80,8 +85,10 @@ def _build_config(
         "answer_loss_weight": answer_loss_weight,
         "evidence_loss_weight": evidence_loss_weight,
         "class_weighted_answer_loss": class_weighted_answer_loss,
+        "class_weight_mode": class_weight_mode,
         "class_weight_power": class_weight_power,
         "class_weight_max": class_weight_max,
+        "no_audio": no_audio,
         "embeddings_path": (
             f"embeddings/{dataset_config['embeddings_prefix']}"
             f"{encoder}_embeddings.pt"
@@ -116,7 +123,7 @@ def smoke_test(config):
     )
     model.configure_tokenizer_vocab(len(tokenizer))
 
-    logits = model(input_ids, audio)
+    logits = model(input_ids, None if config["no_audio"] else audio)
 
     assert logits.shape[0] == 2, f"Expected batch size 2, got {logits.shape[0]}"
     assert logits.shape[1] == prompt_len, f"Expected seq len {prompt_len}, got {logits.shape[1]}"
@@ -195,6 +202,7 @@ def train(config):
         answer_class_weights = compute_balanced_class_weights(
             dataset=dataset,
             train_idx=train_idx,
+            mode=config["class_weight_mode"],
             power=config["class_weight_power"],
             max_weight=config["class_weight_max"],
             device=device,
@@ -261,11 +269,13 @@ def train(config):
         print(f"  Evidence wt:  {config['evidence_loss_weight']}")
     if answer_class_weights is not None:
         print("  Class-weighted answer loss: enabled")
+        print(f"  Class weight mode:  {config['class_weight_mode']}")
         print(f"  Class weight power: {config['class_weight_power']}")
         print(f"  Class weight max:   {config['class_weight_max']}")
         print("  Answer class weights:")
         for idx, weight in enumerate(answer_class_weights.detach().cpu().tolist()):
             print(f"    {dataset.idx2label[idx]}: {weight:.4f}")
+    print(f"  No audio:     {config['no_audio']}")
     print(f"  Device:       {device}")
     print(f"  Checkpoint:   {config['checkpoint_path']}")
     print()
@@ -283,9 +293,10 @@ def train(config):
                 device=device,
                 answer_class_weights=answer_class_weights,
             )
-            audio = batch["audio"].to(device)
-
-            audio_compressed = compressor(audio)
+            audio_compressed = None
+            if not config["no_audio"]:
+                audio = batch["audio"].to(device)
+                audio_compressed = compressor(audio)
 
             logits = model(input_ids, audio_compressed)
 
@@ -314,9 +325,10 @@ def train(config):
                     device=device,
                     answer_class_weights=answer_class_weights,
                 )
-                audio = batch["audio"].to(device)
-
-                audio_compressed = compressor(audio)
+                audio_compressed = None
+                if not config["no_audio"]:
+                    audio = batch["audio"].to(device)
+                    audio_compressed = compressor(audio)
 
                 logits = model(input_ids, audio_compressed)
 
@@ -346,8 +358,10 @@ def train(config):
                     "class_weighted_answer_loss": (
                         config["class_weighted_answer_loss"]
                     ),
+                    "class_weight_mode": config["class_weight_mode"],
                     "class_weight_power": config["class_weight_power"],
                     "class_weight_max": config["class_weight_max"],
+                    "no_audio": config["no_audio"],
                     "answer_class_weights": (
                         answer_class_weights.detach().cpu()
                         if answer_class_weights is not None
@@ -380,6 +394,7 @@ def train(config):
         criterion=criterion,
         device=device,
         answer_class_weights=answer_class_weights,
+        no_audio=config["no_audio"],
     )
 
     print(f"Test LM loss: {test_loss:.4f}")
@@ -392,6 +407,7 @@ def evaluate_loss(
     criterion,
     device,
     answer_class_weights=None,
+    no_audio=False,
 ):
     model.eval()
     total_loss = 0.0
@@ -406,9 +422,10 @@ def evaluate_loss(
                 device=device,
                 answer_class_weights=answer_class_weights,
             )
-            audio = batch["audio"].to(device)
-
-            audio_compressed = compressor(audio)
+            audio_compressed = None
+            if not no_audio:
+                audio = batch["audio"].to(device)
+                audio_compressed = compressor(audio)
 
             logits = model(input_ids, audio_compressed)
 
@@ -422,6 +439,7 @@ def evaluate_loss(
 def compute_balanced_class_weights(
     dataset,
     train_idx,
+    mode: str,
     power: float,
     max_weight: float,
     device,
@@ -436,7 +454,12 @@ def compute_balanced_class_weights(
 
     weights = torch.ones(num_classes, dtype=torch.float)
     present = counts > 0
-    weights[present] = total / (present.sum().float() * counts[present])
+    if mode == "balanced":
+        weights[present] = total / (float(num_classes) * counts[present])
+    elif mode == "inverse":
+        weights[present] = total / counts[present]
+    else:
+        raise ValueError(f"Unknown class weight mode: {mode}")
 
     if power != 1.0:
         weights = weights.pow(power)
@@ -580,6 +603,13 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        "--class_weight_mode",
+        choices=["balanced", "inverse"],
+        default="balanced",
+        help="Class weighting formula for answer-label tokens.",
+    )
+
+    parser.add_argument(
         "--class_weight_power",
         type=float,
         default=1.0,
@@ -591,6 +621,12 @@ if __name__ == "__main__":
         type=float,
         default=5.0,
         help="Maximum clipped answer class weight; set <= 0 to disable clipping.",
+    )
+
+    parser.add_argument(
+        "--no_audio",
+        action="store_true",
+        help="Train the generation model with text prompts only and no audio fusion.",
     )
 
     args = parser.parse_args()
@@ -605,8 +641,10 @@ if __name__ == "__main__":
         answer_loss_weight=args.answer_loss_weight,
         evidence_loss_weight=args.evidence_loss_weight,
         class_weighted_answer_loss=args.class_weighted_answer_loss,
+        class_weight_mode=args.class_weight_mode,
         class_weight_power=args.class_weight_power,
         class_weight_max=args.class_weight_max,
+        no_audio=args.no_audio,
     )
 
     smoke_test(config)

@@ -103,7 +103,7 @@ class AudioGPT2Generation(nn.Module):
             block_out = gpt2_block(hidden)
             hidden = block_out if isinstance(block_out, torch.Tensor) else block_out[0]
 
-            if i in self.fusion_indices:
+            if audio_hidden is not None and i in self.fusion_indices:
                 hidden, _ = next(fusion_iter)(hidden, audio_hidden)
 
         hidden = self.gpt2.transformer.ln_f(hidden)

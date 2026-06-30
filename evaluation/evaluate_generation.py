@@ -31,6 +31,7 @@ GENERATION_PROMPT_TYPES = [
     "reasoning_generation_global",
     "speaker_reasoning_generation",
     "speaker_reasoning_generation_answer_first",
+    "speaker_acoustic_cue_generation",
 ]
 
 REASONING_PROMPT_TYPES = {
@@ -53,8 +54,13 @@ LABEL_CONSTRAINED_PROMPT_TYPES = {
     "speaker_feature_answer_evidence_generation",
 }
 
+ACOUSTIC_CUE_PROMPT_TYPE = "speaker_acoustic_cue_generation"
+CUE_NAMES = ("pitch", "energy", "rhythm", "duration")
+
 
 def _max_length_for_prompt_type(prompt_type: str) -> int:
+    if prompt_type == ACOUSTIC_CUE_PROMPT_TYPE:
+        return 128
     if "reasoning_generation" in prompt_type:
         return 224
     if "feature" in prompt_type:
@@ -63,6 +69,8 @@ def _max_length_for_prompt_type(prompt_type: str) -> int:
 
 
 def _max_new_tokens_for_prompt_type(prompt_type: str) -> int:
+    if prompt_type == ACOUSTIC_CUE_PROMPT_TYPE:
+        return 32
     if prompt_type in REASONING_PROMPT_TYPES:
         return 96
     return 5
@@ -75,6 +83,8 @@ def _build_config(
     checkpoint_path: str | None = None,
     candidate_scoring: str = "none",
     generate_evidence: bool = False,
+    no_audio: bool = False,
+    cue_perturbation: str = "none",
 ) -> dict:
     dataset_config = get_dataset_config(dataset)
     tag = f"{encoder}_{prompt_type}_generation"
@@ -111,6 +121,8 @@ def _build_config(
         "max_new_tokens": max_new_tokens,
         "candidate_scoring": candidate_scoring,
         "generate_evidence": generate_evidence,
+        "no_audio": no_audio,
+        "cue_perturbation": cue_perturbation,
         "preprocessing_script": dataset_config["preprocessing_script"],
     }
 
@@ -187,6 +199,73 @@ def extract_speaker_relative_cues(prompt: str) -> str:
     return match.group(1).strip() if match else ""
 
 
+def replace_speaker_relative_cues(prompt: str, cue_text: str) -> str:
+    return re.sub(
+        r"(Speaker-relative acoustic cues:\s*)(.*?)(\.\s*)?$",
+        rf"\g<1>{cue_text}\g<3>",
+        prompt,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+
+def invert_cue_text(cue_text: str) -> str:
+    replacements = (
+        ("higher", "__CUE_HIGHER__"),
+        ("lower", "higher"),
+        ("__CUE_HIGHER__", "lower"),
+        ("faster", "__CUE_FASTER__"),
+        ("slower", "faster"),
+        ("__CUE_FASTER__", "slower"),
+        ("longer", "__CUE_LONGER__"),
+        ("shorter", "longer"),
+        ("__CUE_LONGER__", "shorter"),
+        ("high", "__CUE_HIGH__"),
+        ("low", "high"),
+        ("__CUE_HIGH__", "low"),
+    )
+
+    perturbed = cue_text
+    for source, target in replacements:
+        perturbed = re.sub(rf"\b{source}\b", target, perturbed, flags=re.IGNORECASE)
+
+    return perturbed
+
+
+def build_eval_prompt_overrides(dataset, test_idx, cue_perturbation: str):
+    if cue_perturbation == "none":
+        return {}
+
+    prompts = {
+        idx: build_prompt_for_eval(dataset, idx)
+        for idx in test_idx
+    }
+
+    if cue_perturbation == "invert":
+        return {
+            idx: replace_speaker_relative_cues(
+                prompt,
+                invert_cue_text(extract_speaker_relative_cues(prompt)),
+            )
+            for idx, prompt in prompts.items()
+        }
+
+    if cue_perturbation == "shuffle":
+        cue_texts = [
+            extract_speaker_relative_cues(prompts[idx])
+            for idx in test_idx
+        ]
+        if not cue_texts:
+            return prompts
+
+        shifted_cues = cue_texts[1:] + cue_texts[:1]
+        return {
+            idx: replace_speaker_relative_cues(prompts[idx], shifted_cue)
+            for idx, shifted_cue in zip(test_idx, shifted_cues)
+        }
+
+    raise ValueError(f"Unknown cue perturbation: {cue_perturbation}")
+
+
 def cue_faithfulness_ok(cue_text: str, evidence_text: str) -> bool:
     cue_text = cue_text.lower()
     evidence_text = evidence_text.lower()
@@ -206,6 +285,25 @@ def cue_faithfulness_ok(cue_text: str, evidence_text: str) -> bool:
             return False
 
     return True
+
+
+def parse_acoustic_cues(text: str) -> tuple[dict[str, str], bool]:
+    parsed = {}
+    for cue_name in CUE_NAMES:
+        match = re.search(
+            rf"<{cue_name}>(.*?)</{cue_name}>",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        parsed[cue_name] = match.group(1).strip().lower() if match else ""
+
+    format_valid = bool(
+        re.search(r"<caption>", text, flags=re.IGNORECASE)
+        and re.search(r"</caption>", text, flags=re.IGNORECASE)
+        and all(parsed[cue_name] for cue_name in CUE_NAMES)
+    )
+
+    return parsed, format_valid
 
 
 def parse_generated_label(
@@ -308,15 +406,22 @@ def evaluate_candidate_scoring(
     config,
     mode: str,
     label_names: list[str],
+    prompt_overrides=None,
 ):
     y_true = []
     y_pred = []
 
     for local_batch_idx, batch in enumerate(loader):
         original_idx = test_idx[local_batch_idx]
-        prompt = build_prompt_for_eval(dataset, original_idx)
-        audio = batch["audio"].to(config["device"])
-        audio_compressed = compressor(audio)
+        prompt = (
+            prompt_overrides.get(original_idx)
+            if prompt_overrides is not None and original_idx in prompt_overrides
+            else build_prompt_for_eval(dataset, original_idx)
+        )
+        audio_compressed = None
+        if not config["no_audio"]:
+            audio = batch["audio"].to(config["device"])
+            audio_compressed = compressor(audio)
         class_label = batch["class_label"].item()
 
         best_label = None
@@ -422,6 +527,59 @@ def _print_classification_metrics(y_true, y_pred, label_names: list[str]):
     print(Counter(y_pred))
 
 
+def output_suffix(config) -> str:
+    parts = []
+    if config["no_audio"]:
+        parts.append("no_audio")
+    if config["cue_perturbation"] != "none":
+        parts.append(f"cue_{config['cue_perturbation']}")
+    if config["generate_evidence"]:
+        parts.append("evidence")
+    return "_" + "_".join(parts) if parts else ""
+
+
+def write_generation_samples(config, sample_rows):
+    os.makedirs("evaluation_outputs", exist_ok=True)
+    sample_path = os.path.join(
+        "evaluation_outputs",
+        (
+            f"{config['encoder']}_{config['prompt_type']}"
+            f"{output_suffix(config)}_samples.csv"
+        ),
+    )
+    fieldnames = [
+        "prompt_type",
+        "true_label",
+        "parsed_prediction",
+        "speaker_relative_cues",
+        "generated_text",
+        "think_text",
+        "answer_text",
+        "evidence_text",
+        "evidence_format_valid",
+        "evidence_non_empty",
+        "evidence_cue_mention",
+        "evidence_faithfulness_ok",
+        "true_pitch",
+        "pred_pitch",
+        "true_energy",
+        "pred_energy",
+        "true_rhythm",
+        "pred_rhythm",
+        "true_duration",
+        "pred_duration",
+        "cue_format_valid",
+        "cue_exact_match",
+    ]
+
+    with open(sample_path, "w", newline="") as fp:
+        writer = csv.DictWriter(fp, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(sample_rows[:50])
+
+    return sample_path
+
+
 def _single_token_id(tokenizer, token: str) -> int | None:
     token_ids = tokenizer.encode(token, add_special_tokens=False)
     if len(token_ids) != 1:
@@ -433,6 +591,8 @@ def _structured_token_ids(tokenizer):
     return {
         "think_start": _single_token_id(tokenizer, "<think>"),
         "think_end": _single_token_id(tokenizer, "</think>"),
+        "caption_start": _single_token_id(tokenizer, "<caption>"),
+        "caption_end": _single_token_id(tokenizer, "</caption>"),
         "answer_start": _single_token_id(tokenizer, "<answer>"),
         "answer_end": _single_token_id(tokenizer, "</answer>"),
         "evidence_start": _single_token_id(tokenizer, "<evidence>"),
@@ -590,7 +750,10 @@ def greedy_generate(
 
         if next_token.item() == tokenizer.eos_token_id:
             break
-        if generate_evidence:
+        if prompt_type == ACOUSTIC_CUE_PROMPT_TYPE:
+            if next_token.item() == structured_ids["caption_end"]:
+                break
+        elif generate_evidence:
             if next_token.item() == structured_ids["evidence_end"]:
                 break
         elif next_token.item() == structured_ids["answer_end"]:
@@ -635,6 +798,11 @@ def evaluate(config):
         val_speakers=config["val_speakers"],
         test_speakers=config["test_speakers"],
     )
+    prompt_overrides = build_eval_prompt_overrides(
+        dataset,
+        test_idx,
+        config["cue_perturbation"],
+    )
 
     test_dataset = Subset(dataset, test_idx)
 
@@ -671,6 +839,9 @@ def evaluate(config):
     evidence_non_empty_flags = []
     evidence_cue_mention_flags = []
     evidence_faithfulness_flags = []
+    cue_format_valid_flags = []
+    cue_correct_flags = {cue_name: [] for cue_name in CUE_NAMES}
+    cue_exact_match_flags = []
 
     print("\nGeneration evaluation configuration:")
     print(f"  Dataset:     {config['dataset']}")
@@ -680,13 +851,18 @@ def evaluate(config):
     print(f"  Checkpoint:  {config['checkpoint_path']}")
     print(f"  Candidate scoring: {config['candidate_scoring']}")
     print(f"  Generate evidence: {config['generate_evidence']}")
+    print(f"  No audio:    {config['no_audio']}")
+    print(f"  Cue perturbation: {config['cue_perturbation']}")
     print(f"  Max new tokens: {config['max_new_tokens']}")
     print()
 
     for local_batch_idx, batch in enumerate(loader):
         original_idx = test_idx[local_batch_idx]
 
-        prompt = build_prompt_for_eval(dataset, original_idx)
+        prompt = prompt_overrides.get(
+            original_idx,
+            build_prompt_for_eval(dataset, original_idx),
+        )
 
         encoded_prompt = tokenizer(
             prompt,
@@ -697,10 +873,12 @@ def evaluate(config):
         )
 
         input_ids = encoded_prompt["input_ids"].to(device)
-        audio = batch["audio"].to(device)
         class_label = batch["class_label"].item()
 
-        audio_compressed = compressor(audio)
+        audio_compressed = None
+        if not config["no_audio"]:
+            audio = batch["audio"].to(device)
+            audio_compressed = compressor(audio)
 
         generated_ids = greedy_generate(
             model=model,
@@ -723,18 +901,58 @@ def evaluate(config):
         else:
             generated_text = full_text.strip()
 
-        pred_label, think_text, extracted_answer_text, format_valid = parse_generated_label(
-            generated_text,
-            config["prompt_type"],
-            label_names,
-        )
-
         true_label = dataset.idx2label[int(class_label)]
         cue_text = extract_speaker_relative_cues(prompt)
         evidence_text, evidence_format_valid = extract_evidence_text(generated_text)
         evidence_non_empty = bool(evidence_text.strip())
         evidence_cue_mention = mentions_evidence_cue(evidence_text)
         evidence_faithfulness = cue_faithfulness_ok(cue_text, evidence_text)
+
+        if config["prompt_type"] == ACOUSTIC_CUE_PROMPT_TYPE:
+            true_cues = dataset.build_acoustic_cue_target_for_sample(original_idx)
+            pred_cues, cue_format_valid = parse_acoustic_cues(generated_text)
+            cue_format_valid_flags.append(cue_format_valid)
+
+            exact_match = True
+            for cue_name in CUE_NAMES:
+                is_correct = pred_cues[cue_name] == true_cues[cue_name]
+                cue_correct_flags[cue_name].append(is_correct)
+                exact_match = exact_match and is_correct
+            cue_exact_match_flags.append(exact_match)
+
+            generated_answers.append(generated_text)
+            generated_full_texts.append(full_text)
+            sample_rows.append({
+                "prompt_type": config["prompt_type"],
+                "true_label": true_label,
+                "parsed_prediction": "",
+                "speaker_relative_cues": cue_text,
+                "generated_text": generated_text,
+                "think_text": "",
+                "answer_text": "",
+                "evidence_text": "",
+                "evidence_format_valid": "",
+                "evidence_non_empty": "",
+                "evidence_cue_mention": "",
+                "evidence_faithfulness_ok": "",
+                "true_pitch": true_cues["pitch"],
+                "pred_pitch": pred_cues["pitch"],
+                "true_energy": true_cues["energy"],
+                "pred_energy": pred_cues["energy"],
+                "true_rhythm": true_cues["rhythm"],
+                "pred_rhythm": pred_cues["rhythm"],
+                "true_duration": true_cues["duration"],
+                "pred_duration": pred_cues["duration"],
+                "cue_format_valid": cue_format_valid,
+                "cue_exact_match": exact_match,
+            })
+            continue
+
+        pred_label, think_text, extracted_answer_text, format_valid = parse_generated_label(
+            generated_text,
+            config["prompt_type"],
+            label_names,
+        )
 
         y_true.append(true_label)
 
@@ -763,7 +981,63 @@ def evaluate(config):
             "evidence_non_empty": evidence_non_empty,
             "evidence_cue_mention": evidence_cue_mention,
             "evidence_faithfulness_ok": evidence_faithfulness,
+            "true_pitch": "",
+            "pred_pitch": "",
+            "true_energy": "",
+            "pred_energy": "",
+            "true_rhythm": "",
+            "pred_rhythm": "",
+            "true_duration": "",
+            "pred_duration": "",
+            "cue_format_valid": "",
+            "cue_exact_match": "",
         })
+
+    if config["prompt_type"] == ACOUSTIC_CUE_PROMPT_TYPE:
+        cue_format_validity = sum(cue_format_valid_flags) / max(
+            len(cue_format_valid_flags),
+            1,
+        )
+        cue_accuracies = {
+            cue_name: sum(flags) / max(len(flags), 1)
+            for cue_name, flags in cue_correct_flags.items()
+        }
+        macro_cue_accuracy = sum(cue_accuracies.values()) / len(cue_accuracies)
+        exact_all_cue_match = sum(cue_exact_match_flags) / max(
+            len(cue_exact_match_flags),
+            1,
+        )
+
+        print("Acoustic cue generation results:")
+        print(f"  Format validity:       {cue_format_validity:.4f}")
+        print(f"  Pitch accuracy:        {cue_accuracies['pitch']:.4f}")
+        print(f"  Energy accuracy:       {cue_accuracies['energy']:.4f}")
+        print(f"  Rhythm accuracy:       {cue_accuracies['rhythm']:.4f}")
+        print(f"  Duration accuracy:     {cue_accuracies['duration']:.4f}")
+        print(f"  Macro cue accuracy:    {macro_cue_accuracy:.4f}")
+        print(f"  Exact all-cue match:   {exact_all_cue_match:.4f}")
+
+        print()
+        print("Example generations:")
+        for i in range(min(10, len(generated_answers))):
+            row = sample_rows[i]
+            print("-" * 80)
+            print(
+                "True cues: "
+                f"pitch={row['true_pitch']} energy={row['true_energy']} "
+                f"rhythm={row['true_rhythm']} duration={row['true_duration']}"
+            )
+            print(
+                "Pred cues: "
+                f"pitch={row['pred_pitch']} energy={row['pred_energy']} "
+                f"rhythm={row['pred_rhythm']} duration={row['pred_duration']}"
+            )
+            print(f"Generated: {generated_answers[i]}")
+
+        sample_path = write_generation_samples(config, sample_rows)
+        print()
+        print(f"Saved generated output samples to: {sample_path}")
+        return
 
     invalid_count = sum(1 for pred in y_pred if pred == "invalid")
     format_validity = sum(format_valid_flags) / max(len(format_valid_flags), 1)
@@ -809,31 +1083,7 @@ def evaluate(config):
             print(f"Evidence:  {sample_rows[i]['evidence_text']}")
         print(f"Generated: {generated_answers[i]}")
 
-    os.makedirs("evaluation_outputs", exist_ok=True)
-    sample_path = os.path.join(
-        "evaluation_outputs",
-        f"{config['encoder']}_{config['prompt_type']}_samples.csv",
-    )
-    with open(sample_path, "w", newline="") as fp:
-        writer = csv.DictWriter(
-            fp,
-            fieldnames=[
-                "prompt_type",
-                "true_label",
-                "parsed_prediction",
-                "speaker_relative_cues",
-                "generated_text",
-                "think_text",
-                "answer_text",
-                "evidence_text",
-                "evidence_format_valid",
-                "evidence_non_empty",
-                "evidence_cue_mention",
-                "evidence_faithfulness_ok",
-            ],
-        )
-        writer.writeheader()
-        writer.writerows(sample_rows[:50])
+    sample_path = write_generation_samples(config, sample_rows)
 
     print()
     print(f"Saved generated output samples to: {sample_path}")
@@ -849,6 +1099,7 @@ def evaluate(config):
             config=config,
             mode="answer",
             label_names=label_names,
+            prompt_overrides=prompt_overrides,
         )
 
     if config["candidate_scoring"] in ("full_target", "both"):
@@ -862,6 +1113,7 @@ def evaluate(config):
             config=config,
             mode="full_target",
             label_names=label_names,
+            prompt_overrides=prompt_overrides,
         )
 
 
@@ -916,6 +1168,19 @@ if __name__ == "__main__":
         ),
     )
 
+    parser.add_argument(
+        "--no_audio",
+        action="store_true",
+        help="Evaluate generation with text prompts only and no audio fusion.",
+    )
+
+    parser.add_argument(
+        "--cue_perturbation",
+        default="none",
+        choices=["none", "invert", "shuffle"],
+        help="Evaluation-only perturbation for speaker-relative cue text prompts.",
+    )
+
     args = parser.parse_args()
 
     config = _build_config(
@@ -925,6 +1190,8 @@ if __name__ == "__main__":
         checkpoint_path=args.checkpoint_path,
         candidate_scoring=args.candidate_scoring,
         generate_evidence=args.generate_evidence,
+        no_audio=args.no_audio,
+        cue_perturbation=args.cue_perturbation,
     )
 
     evaluate(config)

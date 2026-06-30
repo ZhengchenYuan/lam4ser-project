@@ -94,6 +94,10 @@ PROMPTS = {
     "speaker_reasoning_generation_answer_first": (
         "Describe the emotional speech and predict the emotion."
     ),
+
+    "speaker_acoustic_cue_generation": (
+        "Predict the speaker-relative acoustic cue categories for this speech."
+    ),
 }
 
 
@@ -121,6 +125,7 @@ def get_prompt(
             - reasoning_generation_global
             - speaker_reasoning_generation
             - speaker_reasoning_generation_answer_first
+            - speaker_acoustic_cue_generation
 
         features:
             Textual acoustic feature description, for example:

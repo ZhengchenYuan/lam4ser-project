@@ -27,6 +27,7 @@ GENERATION_PROMPT_TYPES = (
     "reasoning_generation_global",
     "speaker_reasoning_generation",
     "speaker_reasoning_generation_answer_first",
+    "speaker_acoustic_cue_generation",
 )
 
 ANSWER_TAG_PROMPT_TYPES = (
@@ -61,6 +62,11 @@ SPEAKER_BASELINE_PROMPT_TYPES = (
     "speaker_feature_answer_evidence_generation",
     "speaker_reasoning_generation",
     "speaker_reasoning_generation_answer_first",
+    "speaker_acoustic_cue_generation",
+)
+
+ACOUSTIC_CUE_PROMPT_TYPES = (
+    "speaker_acoustic_cue_generation",
 )
 
 
@@ -119,6 +125,7 @@ class EmoDBGenerationDataset(Dataset):
         self.use_reasoning_target = prompt_type in REASONING_PROMPT_TYPES
         self.use_speaker_reasoning = prompt_type in SPEAKER_REASONING_PROMPT_TYPES
         self.use_speaker_baseline = prompt_type in SPEAKER_BASELINE_PROMPT_TYPES
+        self.use_acoustic_cue_target = prompt_type in ACOUSTIC_CUE_PROMPT_TYPES
 
         data = torch.load(embeddings_path, weights_only=False)
 
@@ -147,17 +154,16 @@ class EmoDBGenerationDataset(Dataset):
             self.file_paths = list(self.all_file_paths)
             self.speaker_ids = [extract_speaker_id(p) for p in self.file_paths]
 
-        if self.use_feature_prompt and self.file_paths is None:
-            raise ValueError(
-                "feature_generation requires wav file paths, but no key among "
-                "('file_paths', 'paths', 'files') was found in the embeddings file."
-            )
+        needs_acoustic_features = (
+            self.use_feature_prompt
+            or self.use_reasoning_target
+            or self.use_acoustic_cue_target
+        )
 
-        if self.use_reasoning_target and self.file_paths is None:
+        if needs_acoustic_features and self.file_paths is None:
             raise ValueError(
-                f"{prompt_type} requires wav file paths for acoustic caption targets, "
-                "but no key among ('file_paths', 'paths', 'files') was found in the "
-                "embeddings file."
+                f"{prompt_type} requires wav file paths, but no key among "
+                "('file_paths', 'paths', 'files') was found in the embeddings file."
             )
 
         self.tokenizer = build_generation_tokenizer(verbose=True)
@@ -167,7 +173,7 @@ class EmoDBGenerationDataset(Dataset):
         self.enrollment_indices = set()
         self.sample_indices = list(range(len(self.embeddings)))
 
-        if self.use_feature_prompt or self.use_reasoning_target:
+        if needs_acoustic_features:
             cache_path = embeddings_path.replace(
                 "_embeddings.pt",
                 "_acoustic_features.pt",
@@ -328,6 +334,19 @@ class EmoDBGenerationDataset(Dataset):
 
     def _build_target_for_sample(self, real_idx: int, label_text: str) -> str:
         if not self.use_reasoning_target:
+            if self.use_acoustic_cue_target:
+                features = self.acoustic_feature_cache[real_idx]
+                speaker_id = extract_speaker_id(self.all_file_paths[real_idx])
+                baseline = self.speaker_baselines.get(
+                    speaker_id,
+                    compute_feature_baseline([features]),
+                )
+                cue_categories = self._speaker_relative_cue_categories(
+                    features,
+                    baseline,
+                )
+                return self._format_acoustic_cue_target(cue_categories)
+
             if self.use_caption_target:
                 features = self.acoustic_feature_cache[real_idx]
                 speaker_id = extract_speaker_id(self.all_file_paths[real_idx])
@@ -380,6 +399,88 @@ class EmoDBGenerationDataset(Dataset):
             return f"<answer>{label_text}</answer><think>{caption} {reasoning}</think>"
 
         return f"<think>{caption} {reasoning}</think><answer>{label_text}</answer>"
+
+    def build_acoustic_cue_target_for_sample(self, idx: int) -> dict[str, str]:
+        real_idx = self.sample_indices[idx]
+        features = self.acoustic_feature_cache[real_idx]
+        speaker_id = extract_speaker_id(self.all_file_paths[real_idx])
+        baseline = self.speaker_baselines.get(
+            speaker_id,
+            compute_feature_baseline([features]),
+        )
+        return self._speaker_relative_cue_categories(features, baseline)
+
+    def _relative_category(
+        self,
+        features,
+        baseline,
+        key: str,
+        lower: str,
+        similar: str,
+        higher: str,
+        threshold: float = 0.5,
+    ) -> str:
+        stats = baseline.get(key, {"mean": 0.0, "std": 1.0})
+        std = float(stats.get("std", 1.0))
+        if std < 1e-6:
+            return similar
+
+        z = (
+            float(features.get(key, 0.0))
+            - float(stats.get("mean", 0.0))
+        ) / std
+
+        if z > threshold:
+            return higher
+        if z < -threshold:
+            return lower
+        return similar
+
+    def _speaker_relative_cue_categories(self, features, baseline) -> dict[str, str]:
+        return {
+            "pitch": self._relative_category(
+                features,
+                baseline,
+                "pitch_mean",
+                lower="lower",
+                similar="similar",
+                higher="higher",
+            ),
+            "energy": self._relative_category(
+                features,
+                baseline,
+                "energy_mean",
+                lower="lower",
+                similar="similar",
+                higher="higher",
+            ),
+            "rhythm": self._relative_category(
+                features,
+                baseline,
+                "tempo",
+                lower="slower",
+                similar="similar",
+                higher="faster",
+            ),
+            "duration": self._relative_category(
+                features,
+                baseline,
+                "duration",
+                lower="shorter",
+                similar="similar",
+                higher="longer",
+            ),
+        }
+
+    def _format_acoustic_cue_target(self, cue_categories: dict[str, str]) -> str:
+        return (
+            "<caption>"
+            f"<pitch>{cue_categories['pitch']}</pitch>"
+            f"<energy>{cue_categories['energy']}</energy>"
+            f"<rhythm>{cue_categories['rhythm']}</rhythm>"
+            f"<duration>{cue_categories['duration']}</duration>"
+            "</caption>"
+        )
 
     def build_target_for_sample(self, idx: int, label_text: str) -> str:
         real_idx = self.sample_indices[idx]
