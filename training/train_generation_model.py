@@ -28,6 +28,7 @@ GENERATION_PROMPT_TYPES = [
     "speaker_reasoning_generation",
     "speaker_reasoning_generation_answer_first",
     "speaker_acoustic_cue_generation",
+    "speaker_acoustic_cue_simple_generation",
 ]
 
 STRUCTURED_ANSWER_PROMPT_TYPES = {
@@ -42,7 +43,10 @@ STRUCTURED_ANSWER_PROMPT_TYPES = {
 
 
 def _max_length_for_prompt_type(prompt_type: str) -> int:
-    if prompt_type == "speaker_acoustic_cue_generation":
+    if prompt_type in (
+        "speaker_acoustic_cue_generation",
+        "speaker_acoustic_cue_simple_generation",
+    ):
         return 128
     if "reasoning_generation" in prompt_type:
         return 224

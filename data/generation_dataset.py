@@ -28,6 +28,7 @@ GENERATION_PROMPT_TYPES = (
     "speaker_reasoning_generation",
     "speaker_reasoning_generation_answer_first",
     "speaker_acoustic_cue_generation",
+    "speaker_acoustic_cue_simple_generation",
 )
 
 ANSWER_TAG_PROMPT_TYPES = (
@@ -63,9 +64,15 @@ SPEAKER_BASELINE_PROMPT_TYPES = (
     "speaker_reasoning_generation",
     "speaker_reasoning_generation_answer_first",
     "speaker_acoustic_cue_generation",
+    "speaker_acoustic_cue_simple_generation",
 )
 
 ACOUSTIC_CUE_PROMPT_TYPES = (
+    "speaker_acoustic_cue_generation",
+    "speaker_acoustic_cue_simple_generation",
+)
+
+ACOUSTIC_CUE_XML_PROMPT_TYPES = (
     "speaker_acoustic_cue_generation",
 )
 
@@ -126,6 +133,7 @@ class EmoDBGenerationDataset(Dataset):
         self.use_speaker_reasoning = prompt_type in SPEAKER_REASONING_PROMPT_TYPES
         self.use_speaker_baseline = prompt_type in SPEAKER_BASELINE_PROMPT_TYPES
         self.use_acoustic_cue_target = prompt_type in ACOUSTIC_CUE_PROMPT_TYPES
+        self.use_acoustic_cue_xml_target = prompt_type in ACOUSTIC_CUE_XML_PROMPT_TYPES
 
         data = torch.load(embeddings_path, weights_only=False)
 
@@ -167,7 +175,7 @@ class EmoDBGenerationDataset(Dataset):
             )
 
         self.tokenizer = build_generation_tokenizer(
-            include_cue_tokens=self.use_acoustic_cue_target,
+            include_cue_tokens=self.use_acoustic_cue_xml_target,
             verbose=True,
         )
 
@@ -348,7 +356,9 @@ class EmoDBGenerationDataset(Dataset):
                     features,
                     baseline,
                 )
-                return self._format_acoustic_cue_target(cue_categories)
+                if self.use_acoustic_cue_xml_target:
+                    return self._format_acoustic_cue_target(cue_categories)
+                return self._format_simple_acoustic_cue_target(cue_categories)
 
             if self.use_caption_target:
                 features = self.acoustic_feature_cache[real_idx]
@@ -482,6 +492,19 @@ class EmoDBGenerationDataset(Dataset):
             f"<energy>{cue_categories['energy']}</energy>"
             f"<rhythm>{cue_categories['rhythm']}</rhythm>"
             f"<duration>{cue_categories['duration']}</duration>"
+            "</caption>"
+        )
+
+    def _format_simple_acoustic_cue_target(
+        self,
+        cue_categories: dict[str, str],
+    ) -> str:
+        return (
+            "<caption> "
+            f"pitch {cue_categories['pitch']} "
+            f"energy {cue_categories['energy']} "
+            f"rhythm {cue_categories['rhythm']} "
+            f"duration {cue_categories['duration']} "
             "</caption>"
         )
 
