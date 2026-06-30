@@ -70,7 +70,7 @@ def _max_length_for_prompt_type(prompt_type: str) -> int:
 
 def _max_new_tokens_for_prompt_type(prompt_type: str) -> int:
     if prompt_type == ACOUSTIC_CUE_PROMPT_TYPE:
-        return 32
+        return 64
     if prompt_type in REASONING_PROMPT_TYPES:
         return 96
     return 5
@@ -812,7 +812,10 @@ def evaluate(config):
         shuffle=False,
     )
 
-    tokenizer = build_generation_tokenizer(verbose=True)
+    tokenizer = build_generation_tokenizer(
+        include_cue_tokens=config["prompt_type"] == ACOUSTIC_CUE_PROMPT_TYPE,
+        verbose=True,
+    )
 
     audio_dim = dataset.embeddings[0].shape[-1]
 

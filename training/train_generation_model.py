@@ -110,7 +110,10 @@ def _build_config(
 def smoke_test(config):
     audio_dim = 768
     prompt_len = config["max_prompt_length"]
-    tokenizer = build_generation_tokenizer(verbose=True)
+    tokenizer = build_generation_tokenizer(
+        include_cue_tokens=config["prompt_type"] == "speaker_acoustic_cue_generation",
+        verbose=True,
+    )
 
     input_ids = torch.randint(0, len(tokenizer), (2, prompt_len))
     audio = torch.randn(2, 50, audio_dim)

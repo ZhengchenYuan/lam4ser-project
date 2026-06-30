@@ -166,7 +166,10 @@ class EmoDBGenerationDataset(Dataset):
                 "('file_paths', 'paths', 'files') was found in the embeddings file."
             )
 
-        self.tokenizer = build_generation_tokenizer(verbose=True)
+        self.tokenizer = build_generation_tokenizer(
+            include_cue_tokens=self.use_acoustic_cue_target,
+            verbose=True,
+        )
 
         self.acoustic_feature_cache = None
         self.speaker_baselines = {}
