@@ -32,7 +32,6 @@ GENERATION_PROMPT_TYPES = [
     "speaker_reasoning_generation",
     "speaker_reasoning_generation_answer_first",
     "speaker_acoustic_cue_generation",
-    "speaker_acoustic_cue_simple_generation",
 ]
 
 REASONING_PROMPT_TYPES = {
@@ -56,16 +55,11 @@ LABEL_CONSTRAINED_PROMPT_TYPES = {
 }
 
 ACOUSTIC_CUE_PROMPT_TYPE = "speaker_acoustic_cue_generation"
-ACOUSTIC_CUE_SIMPLE_PROMPT_TYPE = "speaker_acoustic_cue_simple_generation"
-ACOUSTIC_CUE_PROMPT_TYPES = {
-    ACOUSTIC_CUE_PROMPT_TYPE,
-    ACOUSTIC_CUE_SIMPLE_PROMPT_TYPE,
-}
 CUE_NAMES = ("pitch", "energy", "rhythm", "duration")
 
 
 def _max_length_for_prompt_type(prompt_type: str) -> int:
-    if prompt_type in ACOUSTIC_CUE_PROMPT_TYPES:
+    if prompt_type == ACOUSTIC_CUE_PROMPT_TYPE:
         return 128
     if "reasoning_generation" in prompt_type:
         return 224
@@ -75,8 +69,8 @@ def _max_length_for_prompt_type(prompt_type: str) -> int:
 
 
 def _max_new_tokens_for_prompt_type(prompt_type: str) -> int:
-    if prompt_type in ACOUSTIC_CUE_PROMPT_TYPES:
-        return 64
+    if prompt_type == ACOUSTIC_CUE_PROMPT_TYPE:
+        return 32
     if prompt_type in REASONING_PROMPT_TYPES:
         return 96
     return 5
@@ -293,7 +287,7 @@ def cue_faithfulness_ok(cue_text: str, evidence_text: str) -> bool:
     return True
 
 
-def parse_acoustic_cues_xml(text: str) -> tuple[dict[str, str], bool]:
+def parse_acoustic_cues(text: str) -> tuple[dict[str, str], bool]:
     parsed = {}
     for cue_name in CUE_NAMES:
         match = re.search(
@@ -310,43 +304,6 @@ def parse_acoustic_cues_xml(text: str) -> tuple[dict[str, str], bool]:
     )
 
     return parsed, format_valid
-
-
-def parse_acoustic_cues_simple(text: str) -> tuple[dict[str, str], bool]:
-    caption_match = re.search(
-        r"<caption>(.*?)</caption>",
-        text,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    cue_text = caption_match.group(1) if caption_match else text
-    cue_text = re.sub(r"\s+", " ", cue_text).strip().lower()
-
-    patterns = {
-        "pitch": r"\bpitch\s+(higher|lower|similar)\b",
-        "energy": r"\benergy\s+(higher|lower|similar)\b",
-        "rhythm": r"\brhythm\s+(faster|slower|similar)\b",
-        "duration": r"\bduration\s+(longer|shorter|similar)\b",
-    }
-
-    parsed = {}
-    for cue_name, pattern in patterns.items():
-        match = re.search(pattern, cue_text, flags=re.IGNORECASE)
-        parsed[cue_name] = match.group(1).lower() if match else ""
-
-    format_valid = bool(
-        caption_match
-        and all(parsed[cue_name] for cue_name in CUE_NAMES)
-    )
-    return parsed, format_valid
-
-
-def parse_acoustic_cues(
-    text: str,
-    prompt_type: str,
-) -> tuple[dict[str, str], bool]:
-    if prompt_type == ACOUSTIC_CUE_SIMPLE_PROMPT_TYPE:
-        return parse_acoustic_cues_simple(text)
-    return parse_acoustic_cues_xml(text)
 
 
 def parse_generated_label(
@@ -793,7 +750,7 @@ def greedy_generate(
 
         if next_token.item() == tokenizer.eos_token_id:
             break
-        if prompt_type in ACOUSTIC_CUE_PROMPT_TYPES:
+        if prompt_type == ACOUSTIC_CUE_PROMPT_TYPE:
             if next_token.item() == structured_ids["caption_end"]:
                 break
         elif generate_evidence:
@@ -855,10 +812,7 @@ def evaluate(config):
         shuffle=False,
     )
 
-    tokenizer = build_generation_tokenizer(
-        include_cue_tokens=config["prompt_type"] == ACOUSTIC_CUE_PROMPT_TYPE,
-        verbose=True,
-    )
+    tokenizer = build_generation_tokenizer(verbose=True)
 
     audio_dim = dataset.embeddings[0].shape[-1]
 
@@ -954,12 +908,9 @@ def evaluate(config):
         evidence_cue_mention = mentions_evidence_cue(evidence_text)
         evidence_faithfulness = cue_faithfulness_ok(cue_text, evidence_text)
 
-        if config["prompt_type"] in ACOUSTIC_CUE_PROMPT_TYPES:
+        if config["prompt_type"] == ACOUSTIC_CUE_PROMPT_TYPE:
             true_cues = dataset.build_acoustic_cue_target_for_sample(original_idx)
-            pred_cues, cue_format_valid = parse_acoustic_cues(
-                generated_text,
-                config["prompt_type"],
-            )
+            pred_cues, cue_format_valid = parse_acoustic_cues(generated_text)
             cue_format_valid_flags.append(cue_format_valid)
 
             exact_match = True
@@ -1042,7 +993,7 @@ def evaluate(config):
             "cue_exact_match": "",
         })
 
-    if config["prompt_type"] in ACOUSTIC_CUE_PROMPT_TYPES:
+    if config["prompt_type"] == ACOUSTIC_CUE_PROMPT_TYPE:
         cue_format_validity = sum(cue_format_valid_flags) / max(
             len(cue_format_valid_flags),
             1,

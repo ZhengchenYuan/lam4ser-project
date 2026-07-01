@@ -28,7 +28,6 @@ GENERATION_PROMPT_TYPES = [
     "speaker_reasoning_generation",
     "speaker_reasoning_generation_answer_first",
     "speaker_acoustic_cue_generation",
-    "speaker_acoustic_cue_simple_generation",
 ]
 
 STRUCTURED_ANSWER_PROMPT_TYPES = {
@@ -43,10 +42,7 @@ STRUCTURED_ANSWER_PROMPT_TYPES = {
 
 
 def _max_length_for_prompt_type(prompt_type: str) -> int:
-    if prompt_type in (
-        "speaker_acoustic_cue_generation",
-        "speaker_acoustic_cue_simple_generation",
-    ):
+    if prompt_type == "speaker_acoustic_cue_generation":
         return 128
     if "reasoning_generation" in prompt_type:
         return 224
@@ -114,10 +110,7 @@ def _build_config(
 def smoke_test(config):
     audio_dim = 768
     prompt_len = config["max_prompt_length"]
-    tokenizer = build_generation_tokenizer(
-        include_cue_tokens=config["prompt_type"] == "speaker_acoustic_cue_generation",
-        verbose=True,
-    )
+    tokenizer = build_generation_tokenizer(verbose=True)
 
     input_ids = torch.randint(0, len(tokenizer), (2, prompt_len))
     audio = torch.randn(2, 50, audio_dim)
