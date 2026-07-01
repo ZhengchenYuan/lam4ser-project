@@ -98,6 +98,10 @@ PROMPTS = {
     "speaker_acoustic_cue_generation": (
         "Predict the speaker-relative acoustic cue categories for this speech."
     ),
+
+    "speaker_acoustic_cue_simple_generation": (
+        "Predict the speaker-relative acoustic cue categories for this speech."
+    ),
 }
 
 
@@ -126,6 +130,7 @@ def get_prompt(
             - speaker_reasoning_generation
             - speaker_reasoning_generation_answer_first
             - speaker_acoustic_cue_generation
+            - speaker_acoustic_cue_simple_generation
 
         features:
             Textual acoustic feature description, for example:
