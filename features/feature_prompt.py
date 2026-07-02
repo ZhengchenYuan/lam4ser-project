@@ -120,6 +120,7 @@ def acoustic_features_to_speaker_relative_caption(
     features: Dict[str, float],
     baseline,
     threshold: float = 0.5,
+    baseline_label: str = "neutral baseline",
 ) -> str:
     """
     Convert acoustic features into a speaker-relative target caption.
@@ -130,7 +131,7 @@ def acoustic_features_to_speaker_relative_caption(
             baseline,
             "pitch_mean",
             lower="relatively lower pitch",
-            similar="pitch close to this speaker's baseline",
+            similar=f"pitch close to this speaker's {baseline_label}",
             higher="relatively higher pitch",
             threshold=threshold,
         ),
@@ -139,7 +140,7 @@ def acoustic_features_to_speaker_relative_caption(
             baseline,
             "energy_mean",
             lower="relatively lower energy",
-            similar="energy close to this speaker's baseline",
+            similar=f"energy close to this speaker's {baseline_label}",
             higher="relatively higher energy",
             threshold=threshold,
         ),
@@ -148,7 +149,7 @@ def acoustic_features_to_speaker_relative_caption(
             baseline,
             "tempo",
             lower="a slower rhythm",
-            similar="a baseline-like rhythm",
+            similar=f"a rhythm close to this speaker's {baseline_label}",
             higher="a faster rhythm",
             threshold=threshold,
         ),
@@ -157,14 +158,14 @@ def acoustic_features_to_speaker_relative_caption(
             baseline,
             "duration",
             lower="a shorter duration",
-            similar="a typical duration",
+            similar=f"a duration close to this speaker's {baseline_label}",
             higher="a longer duration",
             threshold=threshold,
         ),
     ])
 
     return (
-        "Compared with this speaker's usual speaking pattern, "
+        f"Compared with this speaker's {baseline_label}, "
         f"the utterance has {cues}."
     )
 
@@ -173,6 +174,7 @@ def acoustic_features_to_speaker_relative_cues(
     features: Dict[str, float],
     baseline,
     threshold: float = 0.5,
+    baseline_label: str = "neutral baseline",
 ) -> str:
     """
     Convert acoustic features into compact speaker-relative prompt cues.
@@ -182,36 +184,36 @@ def acoustic_features_to_speaker_relative_cues(
             features,
             baseline,
             "pitch_mean",
-            lower="lower pitch than this speaker's baseline",
-            similar="baseline-like pitch",
-            higher="higher pitch than this speaker's baseline",
+            lower=f"lower pitch than this speaker's {baseline_label}",
+            similar=f"pitch close to this speaker's {baseline_label}",
+            higher=f"higher pitch than this speaker's {baseline_label}",
             threshold=threshold,
         ),
         _relative_feature_phrase(
             features,
             baseline,
             "energy_mean",
-            lower="lower energy than this speaker's baseline",
-            similar="baseline-like energy",
-            higher="higher energy than this speaker's baseline",
+            lower=f"lower energy than this speaker's {baseline_label}",
+            similar=f"energy close to this speaker's {baseline_label}",
+            higher=f"higher energy than this speaker's {baseline_label}",
             threshold=threshold,
         ),
         _relative_feature_phrase(
             features,
             baseline,
             "tempo",
-            lower="slower rhythm than this speaker's baseline",
-            similar="baseline-like rhythm",
-            higher="faster rhythm than this speaker's baseline",
+            lower=f"slower rhythm than this speaker's {baseline_label}",
+            similar=f"rhythm close to this speaker's {baseline_label}",
+            higher=f"faster rhythm than this speaker's {baseline_label}",
             threshold=threshold,
         ),
         _relative_feature_phrase(
             features,
             baseline,
             "duration",
-            lower="shorter duration than this speaker's baseline",
-            similar="typical duration",
-            higher="longer duration than this speaker's baseline",
+            lower=f"shorter duration than this speaker's {baseline_label}",
+            similar=f"duration close to this speaker's {baseline_label}",
+            higher=f"longer duration than this speaker's {baseline_label}",
             threshold=threshold,
         ),
     ])
@@ -222,11 +224,17 @@ def speaker_relative_evidence_sentence(
     baseline,
     label: str,
     threshold: float = 0.5,
+    baseline_label: str = "neutral baseline",
 ) -> str:
     """
     Build a short evidence sentence from the most salient speaker-relative cues.
     """
-    cues = _speaker_relative_evidence_cues(features, baseline, threshold)
+    cues = _speaker_relative_evidence_cues(
+        features,
+        baseline,
+        threshold,
+        baseline_label,
+    )
     cue_text = _join_cues([cue["phrase"] for cue in cues])
     verb = "suggests" if len(cues) == 1 and cues[0].get("singular") else "suggest"
     interpretation = _interpret_evidence_cues(cues)
@@ -234,30 +242,30 @@ def speaker_relative_evidence_sentence(
     return f"{cue_text} {verb} {interpretation}, supporting {label}."
 
 
-def _speaker_relative_evidence_cues(features, baseline, threshold):
+def _speaker_relative_evidence_cues(features, baseline, threshold, baseline_label):
     cue_specs = [
         (
             "pitch_mean",
-            "lower pitch than this speaker's baseline",
-            "higher pitch than this speaker's baseline",
+            f"lower pitch than this speaker's {baseline_label}",
+            f"higher pitch than this speaker's {baseline_label}",
             "pitch",
         ),
         (
             "energy_mean",
-            "lower energy than this speaker's baseline",
-            "higher energy than this speaker's baseline",
+            f"lower energy than this speaker's {baseline_label}",
+            f"higher energy than this speaker's {baseline_label}",
             "energy",
         ),
         (
             "tempo",
-            "slower rhythm than this speaker's baseline",
-            "faster rhythm than this speaker's baseline",
+            f"slower rhythm than this speaker's {baseline_label}",
+            f"faster rhythm than this speaker's {baseline_label}",
             "rhythm",
         ),
         (
             "duration",
-            "shorter duration than this speaker's baseline",
-            "longer duration than this speaker's baseline",
+            f"shorter duration than this speaker's {baseline_label}",
+            f"longer duration than this speaker's {baseline_label}",
             "duration",
         ),
     ]
@@ -288,7 +296,7 @@ def _speaker_relative_evidence_cues(features, baseline, threshold):
     return [{
         "name": "delivery",
         "z": 0.0,
-        "phrase": "baseline-like prosody",
+        "phrase": f"prosody close to this speaker's {baseline_label}",
         "singular": True,
     }]
 
@@ -317,10 +325,21 @@ def _interpret_evidence_cues(cues):
     return "a distinct speaker-relative prosodic pattern"
 
 
-def emotion_reasoning_sentence(label: str) -> str:
+def emotion_reasoning_sentence(
+    label: str,
+    baseline_label: str | None = None,
+) -> str:
     """
     Template-based target-side emotion reasoning.
     """
+    neutral_reasoning = (
+        f"These cues are close to this speaker's {baseline_label}, which supports "
+        "neutral."
+        if baseline_label == "neutral baseline"
+        else "These cues are relatively steady for this speaker, which is "
+        "compatible with neutral."
+    )
+
     reasoning = {
         "anger": (
             "These cues suggest stronger emotional activation and tense delivery, "
@@ -338,10 +357,7 @@ def emotion_reasoning_sentence(label: str) -> str:
             "These cues suggest low activation and flat or slow delivery, which "
             "supports boredom."
         ),
-        "neutral": (
-            "These cues suggest steady, baseline-like delivery, which supports "
-            "neutral."
-        ),
+        "neutral": neutral_reasoning,
         "fear": (
             "These cues suggest activated or tense delivery with elevated arousal, "
             "which supports fear."

@@ -65,6 +65,7 @@ def _build_config(
     class_weight_power: float = 1.0,
     class_weight_max: float = 5.0,
     no_audio: bool = False,
+    speaker_baseline_mode: str = "neutral",
 ) -> dict:
     dataset_config = get_dataset_config(dataset)
     tag = f"{encoder}_{prompt_type}_generation"
@@ -89,6 +90,7 @@ def _build_config(
         "class_weight_power": class_weight_power,
         "class_weight_max": class_weight_max,
         "no_audio": no_audio,
+        "speaker_baseline_mode": speaker_baseline_mode,
         "embeddings_path": (
             f"embeddings/{dataset_config['embeddings_prefix']}"
             f"{encoder}_embeddings.pt"
@@ -148,6 +150,7 @@ def train(config):
         max_length=config["max_prompt_length"],
         answer_loss_weight=config["answer_loss_weight"],
         evidence_loss_weight=config["evidence_loss_weight"],
+        speaker_baseline_mode=config["speaker_baseline_mode"],
     )
 
     if (
@@ -263,6 +266,7 @@ def train(config):
     print(f"  Encoder:      {config['encoder']}")
     print(f"  Prompt type:  {config['prompt_type']}")
     print(f"  Prompt length:{config['max_prompt_length']}")
+    print(f"  Speaker baseline mode: {config['speaker_baseline_mode']}")
     print(f"  LoRA rank:    {config['lora_rank']}")
     if config["prompt_type"] == "speaker_feature_answer_evidence_generation":
         print(f"  Answer weight:{config['answer_loss_weight']}")
@@ -362,6 +366,7 @@ def train(config):
                     "class_weight_power": config["class_weight_power"],
                     "class_weight_max": config["class_weight_max"],
                     "no_audio": config["no_audio"],
+                    "speaker_baseline_mode": config["speaker_baseline_mode"],
                     "answer_class_weights": (
                         answer_class_weights.detach().cpu()
                         if answer_class_weights is not None
@@ -629,6 +634,17 @@ if __name__ == "__main__":
         help="Train the generation model with text prompts only and no audio fusion.",
     )
 
+    parser.add_argument(
+        "--speaker_baseline_mode",
+        choices=["neutral", "emotion_balanced"],
+        default="neutral",
+        help=(
+            "Speaker-relative baseline enrollment mode. 'neutral' uses neutral "
+            "utterances where available; 'emotion_balanced' restores the old "
+            "one-utterance-per-emotion enrollment behavior."
+        ),
+    )
+
     args = parser.parse_args()
 
     config = _build_config(
@@ -645,6 +661,7 @@ if __name__ == "__main__":
         class_weight_power=args.class_weight_power,
         class_weight_max=args.class_weight_max,
         no_audio=args.no_audio,
+        speaker_baseline_mode=args.speaker_baseline_mode,
     )
 
     smoke_test(config)

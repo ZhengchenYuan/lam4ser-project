@@ -85,6 +85,7 @@ def _build_config(
     generate_evidence: bool = False,
     no_audio: bool = False,
     cue_perturbation: str = "none",
+    speaker_baseline_mode: str = "neutral",
 ) -> dict:
     dataset_config = get_dataset_config(dataset)
     tag = f"{encoder}_{prompt_type}_generation"
@@ -123,6 +124,7 @@ def _build_config(
         "generate_evidence": generate_evidence,
         "no_audio": no_audio,
         "cue_perturbation": cue_perturbation,
+        "speaker_baseline_mode": speaker_baseline_mode,
         "preprocessing_script": dataset_config["preprocessing_script"],
     }
 
@@ -790,6 +792,7 @@ def evaluate(config):
         embeddings_path=config["embeddings_path"],
         prompt_type=config["prompt_type"],
         max_length=config["max_prompt_length"],
+        speaker_baseline_mode=config["speaker_baseline_mode"],
     )
     label_names = [dataset.idx2label[i] for i in range(len(dataset.idx2label))]
 
@@ -853,6 +856,7 @@ def evaluate(config):
     print(f"  Generate evidence: {config['generate_evidence']}")
     print(f"  No audio:    {config['no_audio']}")
     print(f"  Cue perturbation: {config['cue_perturbation']}")
+    print(f"  Speaker baseline mode: {config['speaker_baseline_mode']}")
     print(f"  Max new tokens: {config['max_new_tokens']}")
     print()
 
@@ -1181,6 +1185,16 @@ if __name__ == "__main__":
         help="Evaluation-only perturbation for speaker-relative cue text prompts.",
     )
 
+    parser.add_argument(
+        "--speaker_baseline_mode",
+        choices=["neutral", "emotion_balanced"],
+        default="neutral",
+        help=(
+            "Speaker-relative baseline enrollment mode. Use emotion_balanced "
+            "to reproduce the old one-utterance-per-emotion enrollment behavior."
+        ),
+    )
+
     args = parser.parse_args()
 
     config = _build_config(
@@ -1192,6 +1206,7 @@ if __name__ == "__main__":
         generate_evidence=args.generate_evidence,
         no_audio=args.no_audio,
         cue_perturbation=args.cue_perturbation,
+        speaker_baseline_mode=args.speaker_baseline_mode,
     )
 
     evaluate(config)
