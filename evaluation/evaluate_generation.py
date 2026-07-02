@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, Subset
 from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix
 
 from data.dataset_configs import DATASET_CONFIGS, get_dataset_config
-from data.generation_dataset import EmoDBGenerationDataset
+from data.generation_dataset import EmoDBGenerationDataset, SPEAKER_BASELINE_PROMPT_TYPES
 from data.dataset import speaker_independent_split
 from data.prompts import LABELS as DEFAULT_LABELS
 from data.tokenizer_utils import build_generation_tokenizer
@@ -58,6 +58,17 @@ ACOUSTIC_CUE_PROMPT_TYPE = "speaker_acoustic_cue_generation"
 CUE_NAMES = ("pitch", "energy", "rhythm", "duration")
 
 
+def _checkpoint_tag(
+    encoder: str,
+    prompt_type: str,
+    speaker_baseline_mode: str,
+) -> str:
+    if prompt_type in SPEAKER_BASELINE_PROMPT_TYPES:
+        return f"{encoder}_{prompt_type}_{speaker_baseline_mode}_generation"
+
+    return f"{encoder}_{prompt_type}_generation"
+
+
 def _max_length_for_prompt_type(prompt_type: str) -> int:
     if prompt_type == ACOUSTIC_CUE_PROMPT_TYPE:
         return 128
@@ -88,7 +99,11 @@ def _build_config(
     speaker_baseline_mode: str = "neutral",
 ) -> dict:
     dataset_config = get_dataset_config(dataset)
-    tag = f"{encoder}_{prompt_type}_generation"
+    tag = _checkpoint_tag(
+        encoder=encoder,
+        prompt_type=prompt_type,
+        speaker_baseline_mode=speaker_baseline_mode,
+    )
     max_new_tokens = _max_new_tokens_for_prompt_type(prompt_type)
 
     if generate_evidence:

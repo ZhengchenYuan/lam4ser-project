@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader, Subset
 from transformers import get_linear_schedule_with_warmup
 
 from data.dataset_configs import DATASET_CONFIGS, get_dataset_config
-from data.generation_dataset import EmoDBGenerationDataset
+from data.generation_dataset import EmoDBGenerationDataset, SPEAKER_BASELINE_PROMPT_TYPES
 from data.dataset import speaker_independent_split
 from data.tokenizer_utils import build_generation_tokenizer
 from models.compression.compressor import AudioCompressor
@@ -41,6 +41,17 @@ STRUCTURED_ANSWER_PROMPT_TYPES = {
 }
 
 
+def _checkpoint_tag(
+    encoder: str,
+    prompt_type: str,
+    speaker_baseline_mode: str,
+) -> str:
+    if prompt_type in SPEAKER_BASELINE_PROMPT_TYPES:
+        return f"{encoder}_{prompt_type}_{speaker_baseline_mode}_generation"
+
+    return f"{encoder}_{prompt_type}_generation"
+
+
 def _max_length_for_prompt_type(prompt_type: str) -> int:
     if prompt_type == "speaker_acoustic_cue_generation":
         return 128
@@ -68,7 +79,11 @@ def _build_config(
     speaker_baseline_mode: str = "neutral",
 ) -> dict:
     dataset_config = get_dataset_config(dataset)
-    tag = f"{encoder}_{prompt_type}_generation"
+    tag = _checkpoint_tag(
+        encoder=encoder,
+        prompt_type=prompt_type,
+        speaker_baseline_mode=speaker_baseline_mode,
+    )
 
     if lora_rank > 0:
         tag += f"_lora{lora_rank}"
