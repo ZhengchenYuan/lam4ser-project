@@ -45,11 +45,29 @@ def _checkpoint_tag(
     encoder: str,
     prompt_type: str,
     speaker_baseline_mode: str,
+    class_weighted_answer_loss: bool = False,
+    class_weight_mode: str = "balanced",
+    class_weight_power: float = 1.0,
+    class_weight_max: float = 5.0,
 ) -> str:
-    if prompt_type in SPEAKER_BASELINE_PROMPT_TYPES:
-        return f"{encoder}_{prompt_type}_{speaker_baseline_mode}_generation"
+    tag = f"{encoder}_{prompt_type}"
 
-    return f"{encoder}_{prompt_type}_generation"
+    if prompt_type in SPEAKER_BASELINE_PROMPT_TYPES:
+        tag += f"_{speaker_baseline_mode}"
+
+    if class_weighted_answer_loss:
+        max_tag = (
+            str(float(class_weight_max))
+            if class_weight_max is not None and class_weight_max > 0
+            else "none"
+        )
+        tag += (
+            f"_weighted_{class_weight_mode}"
+            f"_p{float(class_weight_power)}"
+            f"_m{max_tag}"
+        )
+
+    return f"{tag}_generation"
 
 
 def _max_length_for_prompt_type(prompt_type: str) -> int:
@@ -83,6 +101,10 @@ def _build_config(
         encoder=encoder,
         prompt_type=prompt_type,
         speaker_baseline_mode=speaker_baseline_mode,
+        class_weighted_answer_loss=class_weighted_answer_loss,
+        class_weight_mode=class_weight_mode,
+        class_weight_power=class_weight_power,
+        class_weight_max=class_weight_max,
     )
 
     if lora_rank > 0:

@@ -62,11 +62,29 @@ def _checkpoint_tag(
     encoder: str,
     prompt_type: str,
     speaker_baseline_mode: str,
+    class_weighted_answer_loss: bool = False,
+    class_weight_mode: str = "balanced",
+    class_weight_power: float = 1.0,
+    class_weight_max: float = 5.0,
 ) -> str:
-    if prompt_type in SPEAKER_BASELINE_PROMPT_TYPES:
-        return f"{encoder}_{prompt_type}_{speaker_baseline_mode}_generation"
+    tag = f"{encoder}_{prompt_type}"
 
-    return f"{encoder}_{prompt_type}_generation"
+    if prompt_type in SPEAKER_BASELINE_PROMPT_TYPES:
+        tag += f"_{speaker_baseline_mode}"
+
+    if class_weighted_answer_loss:
+        max_tag = (
+            str(float(class_weight_max))
+            if class_weight_max is not None and class_weight_max > 0
+            else "none"
+        )
+        tag += (
+            f"_weighted_{class_weight_mode}"
+            f"_p{float(class_weight_power)}"
+            f"_m{max_tag}"
+        )
+
+    return f"{tag}_generation"
 
 
 def _max_length_for_prompt_type(prompt_type: str) -> int:
@@ -97,12 +115,20 @@ def _build_config(
     no_audio: bool = False,
     cue_perturbation: str = "none",
     speaker_baseline_mode: str = "neutral",
+    class_weighted_answer_loss: bool = False,
+    class_weight_mode: str = "balanced",
+    class_weight_power: float = 1.0,
+    class_weight_max: float = 5.0,
 ) -> dict:
     dataset_config = get_dataset_config(dataset)
     tag = _checkpoint_tag(
         encoder=encoder,
         prompt_type=prompt_type,
         speaker_baseline_mode=speaker_baseline_mode,
+        class_weighted_answer_loss=class_weighted_answer_loss,
+        class_weight_mode=class_weight_mode,
+        class_weight_power=class_weight_power,
+        class_weight_max=class_weight_max,
     )
     max_new_tokens = _max_new_tokens_for_prompt_type(prompt_type)
 
@@ -140,6 +166,10 @@ def _build_config(
         "no_audio": no_audio,
         "cue_perturbation": cue_perturbation,
         "speaker_baseline_mode": speaker_baseline_mode,
+        "class_weighted_answer_loss": class_weighted_answer_loss,
+        "class_weight_mode": class_weight_mode,
+        "class_weight_power": class_weight_power,
+        "class_weight_max": class_weight_max,
         "preprocessing_script": dataset_config["preprocessing_script"],
     }
 
@@ -872,6 +902,7 @@ def evaluate(config):
     print(f"  No audio:    {config['no_audio']}")
     print(f"  Cue perturbation: {config['cue_perturbation']}")
     print(f"  Speaker baseline mode: {config['speaker_baseline_mode']}")
+    print(f"  Class-weighted checkpoint: {config['class_weighted_answer_loss']}")
     print(f"  Max new tokens: {config['max_new_tokens']}")
     print()
 
@@ -1210,6 +1241,36 @@ if __name__ == "__main__":
         ),
     )
 
+    parser.add_argument(
+        "--class_weighted_answer_loss",
+        action="store_true",
+        help=(
+            "Use the class-weighted answer-loss checkpoint naming variant. "
+            "This affects default checkpoint selection only during evaluation."
+        ),
+    )
+
+    parser.add_argument(
+        "--class_weight_mode",
+        choices=["balanced", "inverse"],
+        default="balanced",
+        help="Class weighting mode used by the checkpoint naming variant.",
+    )
+
+    parser.add_argument(
+        "--class_weight_power",
+        type=float,
+        default=1.0,
+        help="Class weight power used by the checkpoint naming variant.",
+    )
+
+    parser.add_argument(
+        "--class_weight_max",
+        type=float,
+        default=5.0,
+        help="Class weight max used by the checkpoint naming variant.",
+    )
+
     args = parser.parse_args()
 
     config = _build_config(
@@ -1222,6 +1283,10 @@ if __name__ == "__main__":
         no_audio=args.no_audio,
         cue_perturbation=args.cue_perturbation,
         speaker_baseline_mode=args.speaker_baseline_mode,
+        class_weighted_answer_loss=args.class_weighted_answer_loss,
+        class_weight_mode=args.class_weight_mode,
+        class_weight_power=args.class_weight_power,
+        class_weight_max=args.class_weight_max,
     )
 
     evaluate(config)
