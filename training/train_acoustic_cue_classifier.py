@@ -21,6 +21,7 @@ CUE_LABELS = {
     "duration": ["longer", "shorter", "similar"],
 }
 CUE_NAMES = tuple(CUE_LABELS.keys())
+CUE_FEATURE_KEYS = ("pitch_mean", "energy_mean", "tempo", "duration")
 
 
 class AcousticCueDataset(Dataset):
@@ -46,6 +47,42 @@ class AcousticCueDataset(Dataset):
             self.base.build_acoustic_cue_target_for_sample(idx)
             for idx in range(len(self.base))
         ]
+        self.acoustic_feature_vectors = []
+        self.baseline_feature_vectors = []
+        self.baseline_std_vectors = []
+
+        for idx in range(len(self.base)):
+            real_idx = self.base.sample_indices[idx]
+            features = self.base.acoustic_feature_cache[real_idx]
+            speaker_id = self.base.speaker_ids[idx]
+            baseline = self.base.speaker_baselines.get(speaker_id, {})
+            self.acoustic_feature_vectors.append(
+                self._feature_vector_from_sample(features)
+            )
+            self.baseline_feature_vectors.append(
+                self._feature_vector_from_baseline(baseline, "mean")
+            )
+            self.baseline_std_vectors.append(
+                self._feature_vector_from_baseline(baseline, "std", default=1.0)
+            )
+
+    def _feature_vector_from_sample(self, features):
+        return torch.tensor(
+            [float(features.get(key, 0.0) or 0.0) for key in CUE_FEATURE_KEYS],
+            dtype=torch.float,
+        )
+
+    def _feature_vector_from_baseline(
+        self,
+        baseline,
+        stat_name: str,
+        default: float = 0.0,
+    ):
+        values = []
+        for key in CUE_FEATURE_KEYS:
+            stats = baseline.get(key, {})
+            values.append(float(stats.get(stat_name, default) or default))
+        return torch.tensor(values, dtype=torch.float)
 
     def __len__(self):
         return len(self.base)
@@ -53,7 +90,12 @@ class AcousticCueDataset(Dataset):
     def __getitem__(self, idx):
         base_item = self.base[idx]
         cue_target = self.cue_targets[idx]
-        item = {"audio": base_item["audio"]}
+        item = {
+            "audio": base_item["audio"],
+            "acoustic_features": self.acoustic_feature_vectors[idx],
+            "baseline_features": self.baseline_feature_vectors[idx],
+            "baseline_stds": self.baseline_std_vectors[idx],
+        }
         for cue_name in CUE_NAMES:
             item[cue_name] = torch.tensor(
                 self.cue_to_idx[cue_name][cue_target[cue_name]],
@@ -62,9 +104,27 @@ class AcousticCueDataset(Dataset):
         return item
 
 
-class AcousticCueClassifier(nn.Module):
-    def __init__(self, audio_dim: int, hidden_dim: int = 256, dropout: float = 0.3):
+class TrainableBaselineAdapter(nn.Module):
+    def __init__(self, feature_dim: int):
         super().__init__()
+        self.scale = nn.Parameter(torch.ones(feature_dim))
+        self.bias = nn.Parameter(torch.zeros(feature_dim))
+
+    def forward(self, baseline_features):
+        return self.scale * baseline_features + self.bias
+
+
+class AcousticCueClassifier(nn.Module):
+    def __init__(
+        self,
+        audio_dim: int,
+        hidden_dim: int = 256,
+        dropout: float = 0.3,
+        trainable_baseline_adapter: bool = False,
+        acoustic_feature_dim: int = len(CUE_FEATURE_KEYS),
+    ):
+        super().__init__()
+        self.trainable_baseline_adapter = trainable_baseline_adapter
         self.encoder = nn.Sequential(
             nn.LayerNorm(audio_dim),
             nn.Linear(audio_dim, hidden_dim),
@@ -74,14 +134,51 @@ class AcousticCueClassifier(nn.Module):
             nn.ReLU(),
             nn.Dropout(dropout),
         )
+        head_input_dim = hidden_dim
+        if trainable_baseline_adapter:
+            self.baseline_adapter = TrainableBaselineAdapter(acoustic_feature_dim)
+            self.feature_encoder = nn.Sequential(
+                nn.LayerNorm(acoustic_feature_dim),
+                nn.Linear(acoustic_feature_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+            )
+            head_input_dim += hidden_dim
+        else:
+            self.baseline_adapter = None
+            self.feature_encoder = None
+
         self.heads = nn.ModuleDict({
-            cue_name: nn.Linear(hidden_dim, len(CUE_LABELS[cue_name]))
+            cue_name: nn.Linear(head_input_dim, len(CUE_LABELS[cue_name]))
             for cue_name in CUE_NAMES
         })
 
-    def forward(self, audio_hidden):
+    def forward(
+        self,
+        audio_hidden,
+        acoustic_features=None,
+        baseline_features=None,
+        baseline_stds=None,
+    ):
         pooled = audio_hidden.mean(dim=1)
         encoded = self.encoder(pooled)
+
+        if self.trainable_baseline_adapter:
+            if acoustic_features is None or baseline_features is None:
+                raise ValueError(
+                    "Trainable baseline adapter requires acoustic and baseline features."
+                )
+            adapted_baseline = self.baseline_adapter(baseline_features)
+            if baseline_stds is None:
+                baseline_stds = torch.ones_like(adapted_baseline)
+            relative_features = (
+                acoustic_features - adapted_baseline
+            ) / baseline_stds.clamp_min(1e-6)
+            encoded = torch.cat(
+                [encoded, self.feature_encoder(relative_features)],
+                dim=-1,
+            )
+
         return {
             cue_name: head(encoded)
             for cue_name, head in self.heads.items()
@@ -90,6 +187,8 @@ class AcousticCueClassifier(nn.Module):
 
 def _checkpoint_path(args, dataset_config: dict) -> str:
     tag = f"{args.encoder}_acoustic_cue_classifier_{args.speaker_baseline_mode}"
+    if args.trainable_baseline_adapter:
+        tag += "_trainable_baseline"
     return args.checkpoint_path or f"{dataset_config['checkpoint_dir']}/{tag}_best.pt"
 
 
@@ -115,6 +214,7 @@ def _build_config(args) -> dict:
         "hidden_dim": args.hidden_dim,
         "dropout": args.dropout,
         "target_audio_len": args.target_audio_len,
+        "trainable_baseline_adapter": args.trainable_baseline_adapter,
         "device": "cuda" if torch.cuda.is_available() else "cpu",
     }
 
@@ -125,6 +225,17 @@ def _cue_loss(logits_by_cue, batch, criterion) -> torch.Tensor:
         for cue_name in CUE_NAMES
     ]
     return sum(losses) / len(losses)
+
+
+def _batch_adapter_inputs(batch, device, enabled: bool):
+    if not enabled:
+        return {}
+
+    return {
+        "acoustic_features": batch["acoustic_features"].to(device),
+        "baseline_features": batch["baseline_features"].to(device),
+        "baseline_stds": batch["baseline_stds"].to(device),
+    }
 
 
 def _evaluate(model, compressor, loader, criterion, device):
@@ -141,7 +252,14 @@ def _evaluate(model, compressor, loader, criterion, device):
                 for cue_name in CUE_NAMES
             }
             audio_compressed = compressor(audio)
-            logits_by_cue = model(audio_compressed)
+            logits_by_cue = model(
+                audio_compressed,
+                **_batch_adapter_inputs(
+                    batch,
+                    device,
+                    model.trainable_baseline_adapter,
+                ),
+            )
             total_loss += _cue_loss(logits_by_cue, targets, criterion).item()
 
             for cue_name in CUE_NAMES:
@@ -214,6 +332,7 @@ def train(config):
         audio_dim=audio_dim,
         hidden_dim=config["hidden_dim"],
         dropout=config["dropout"],
+        trainable_baseline_adapter=config["trainable_baseline_adapter"],
     ).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(
@@ -226,6 +345,7 @@ def train(config):
     print(f"  Dataset:      {config['dataset']}")
     print(f"  Encoder:      {config['encoder']}")
     print(f"  Baseline mode:{config['speaker_baseline_mode']}")
+    print(f"  Trainable baseline adapter: {config['trainable_baseline_adapter']}")
     print(f"  Device:       {device}")
     print(f"  Checkpoint:   {config['checkpoint_path']}")
     print(f"  Cue labels:   {CUE_LABELS}")
@@ -246,7 +366,14 @@ def train(config):
             }
 
             audio_compressed = compressor(audio)
-            logits_by_cue = model(audio_compressed)
+            logits_by_cue = model(
+                audio_compressed,
+                **_batch_adapter_inputs(
+                    batch,
+                    device,
+                    model.trainable_baseline_adapter,
+                ),
+            )
             loss = _cue_loss(logits_by_cue, targets, criterion)
 
             optimizer.zero_grad()
@@ -284,6 +411,9 @@ def train(config):
                     "config": config,
                     "cue_labels": CUE_LABELS,
                     "speaker_baseline_mode": config["speaker_baseline_mode"],
+                    "trainable_baseline_adapter": (
+                        config["trainable_baseline_adapter"]
+                    ),
                     "val_loss": val_metrics["loss"],
                     "val_macro_cue_accuracy": val_metrics["macro_cue_accuracy"],
                     "val_exact_all_cue_match": val_metrics["exact_all_cue_match"],
@@ -336,6 +466,14 @@ if __name__ == "__main__":
         choices=["neutral", "emotion_balanced"],
         default="neutral",
         help="Speaker baseline mode used to derive acoustic cue labels.",
+    )
+    parser.add_argument(
+        "--trainable_baseline_adapter",
+        action="store_true",
+        help=(
+            "Enable a shared trainable adapter for speaker baseline acoustic "
+            "feature means."
+        ),
     )
     parser.add_argument("--checkpoint_path", default=None)
 
