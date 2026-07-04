@@ -66,6 +66,7 @@ def _checkpoint_tag(
     class_weight_mode: str = "balanced",
     class_weight_power: float = 1.0,
     class_weight_max: float = 5.0,
+    no_audio: bool = False,
 ) -> str:
     tag = f"{encoder}_{prompt_type}"
 
@@ -83,6 +84,9 @@ def _checkpoint_tag(
             f"_p{float(class_weight_power)}"
             f"_m{max_tag}"
         )
+
+    if no_audio:
+        tag += "_no_audio"
 
     return f"{tag}_generation"
 
@@ -129,6 +133,7 @@ def _build_config(
         class_weight_mode=class_weight_mode,
         class_weight_power=class_weight_power,
         class_weight_max=class_weight_max,
+        no_audio=no_audio,
     )
     max_new_tokens = _max_new_tokens_for_prompt_type(prompt_type)
 
