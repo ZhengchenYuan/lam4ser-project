@@ -63,7 +63,7 @@ def _checkpoint_tag(
     prompt_type: str,
     speaker_baseline_mode: str,
     class_weighted_answer_loss: bool = False,
-    class_weight_mode: str = "balanced",
+    class_weight_mode: str = "inverse",
     class_weight_power: float = 1.0,
     class_weight_max: float = 5.0,
 ) -> str:
@@ -116,7 +116,7 @@ def _build_config(
     cue_perturbation: str = "none",
     speaker_baseline_mode: str = "neutral",
     class_weighted_answer_loss: bool = False,
-    class_weight_mode: str = "balanced",
+    class_weight_mode: str = "inverse",
     class_weight_power: float = 1.0,
     class_weight_max: float = 5.0,
 ) -> dict:
@@ -1253,8 +1253,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--class_weight_mode",
         choices=["balanced", "inverse"],
-        default="balanced",
-        help="Class weighting mode used by the checkpoint naming variant.",
+        default="inverse",
+        help=(
+            "Class weighting mode used by the checkpoint naming variant. "
+            "'inverse' is Andreas's training-split inverse-frequency formula "
+            "weight_c = total_count / count_c; 'balanced' remains available "
+            "as an optional alternative."
+        ),
     )
 
     parser.add_argument(

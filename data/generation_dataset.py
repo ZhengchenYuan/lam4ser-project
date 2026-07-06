@@ -631,7 +631,7 @@ class EmoDBGenerationDataset(Dataset):
         input_ids: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Mark answer-label target tokens for optional class-balanced loss.
+        Mark answer-label target tokens for optional class-weighted loss.
 
         The mask covers the content between <answer> and </answer>, not the
         structural tags. Prompt and padding positions stay inactive.
