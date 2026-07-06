@@ -336,8 +336,8 @@ def emotion_reasoning_sentence(
         f"These cues are close to this speaker's {baseline_label}, which supports "
         "neutral."
         if baseline_label == "neutral baseline"
-        else "These cues are relatively steady for this speaker, which is "
-        "compatible with neutral."
+        else "These cues do not strongly deviate from this speaker-specific "
+        "enrollment average, which supports neutral."
     )
 
     reasoning = {
