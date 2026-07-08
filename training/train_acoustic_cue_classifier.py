@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader, Dataset, Subset
 
 from data.dataset import speaker_independent_split
 from data.dataset_configs import DATASET_CONFIGS, get_dataset_config
-from data.generation_dataset import EmoDBGenerationDataset
+from data.generation_dataset import EmoDBGenerationDataset, extract_speaker_id
 from models.compression.compressor import AudioCompressor
 
 
@@ -22,6 +22,7 @@ CUE_LABELS = {
 }
 CUE_NAMES = tuple(CUE_LABELS.keys())
 CUE_FEATURE_KEYS = ("pitch_mean", "energy_mean", "tempo", "duration")
+BASELINE_ESTIMATION_MODES = ("speaker_neutral", "mixed_effects")
 
 
 class AcousticCueDataset(Dataset):
@@ -52,19 +53,33 @@ class AcousticCueDataset(Dataset):
         self.baseline_std_vectors = []
 
         for idx in range(len(self.base)):
-            real_idx = self.base.sample_indices[idx]
-            features = self.base.acoustic_feature_cache[real_idx]
-            speaker_id = self.base.speaker_ids[idx]
-            baseline = self.base.speaker_baselines.get(speaker_id, {})
-            self.acoustic_feature_vectors.append(
-                self._feature_vector_from_sample(features)
-            )
-            self.baseline_feature_vectors.append(
-                self._feature_vector_from_baseline(baseline, "mean")
-            )
-            self.baseline_std_vectors.append(
-                self._feature_vector_from_baseline(baseline, "std", default=1.0)
-            )
+            self._append_feature_vectors(idx)
+
+    def _append_feature_vectors(self, idx: int):
+        real_idx = self.base.sample_indices[idx]
+        features = self.base.acoustic_feature_cache[real_idx]
+        speaker_id = self.base.speaker_ids[idx]
+        baseline = self.base.speaker_baselines.get(speaker_id, {})
+        self.acoustic_feature_vectors.append(
+            self._feature_vector_from_sample(features)
+        )
+        self.baseline_feature_vectors.append(
+            self._feature_vector_from_baseline(baseline, "mean")
+        )
+        self.baseline_std_vectors.append(
+            self._feature_vector_from_baseline(baseline, "std", default=1.0)
+        )
+
+    def rebuild_acoustic_cue_annotations(self):
+        self.cue_targets = [
+            self.base.build_acoustic_cue_target_for_sample(idx)
+            for idx in range(len(self.base))
+        ]
+        self.acoustic_feature_vectors = []
+        self.baseline_feature_vectors = []
+        self.baseline_std_vectors = []
+        for idx in range(len(self.base)):
+            self._append_feature_vectors(idx)
 
     def _feature_vector_from_sample(self, features):
         return torch.tensor(
@@ -187,6 +202,8 @@ class AcousticCueClassifier(nn.Module):
 
 def _checkpoint_path(args, dataset_config: dict) -> str:
     tag = f"{args.encoder}_acoustic_cue_classifier_{args.speaker_baseline_mode}"
+    if args.baseline_estimation_mode == "mixed_effects":
+        tag += "_mixed_effects"
     if args.trainable_baseline_adapter:
         tag += "_trainable_baseline"
     return args.checkpoint_path or f"{dataset_config['checkpoint_dir']}/{tag}_best.pt"
@@ -214,9 +231,194 @@ def _build_config(args) -> dict:
         "hidden_dim": args.hidden_dim,
         "dropout": args.dropout,
         "target_audio_len": args.target_audio_len,
+        "baseline_estimation_mode": args.baseline_estimation_mode,
         "trainable_baseline_adapter": args.trainable_baseline_adapter,
         "device": "cuda" if torch.cuda.is_available() else "cpu",
     }
+
+
+def _label_text(dataset: AcousticCueDataset, sample_idx: int) -> str:
+    real_idx = dataset.base.sample_indices[sample_idx]
+    return dataset.base._label_to_text(dataset.base.labels[real_idx])
+
+
+def _neutral_enrollment_by_speaker(dataset: AcousticCueDataset):
+    enrollment = {}
+    for real_idx in sorted(dataset.base.enrollment_indices):
+        label_text = dataset.base._label_to_text(dataset.base.labels[real_idx])
+        if label_text != "neutral":
+            continue
+        speaker_id = extract_speaker_id(dataset.base.all_file_paths[real_idx])
+        enrollment.setdefault(speaker_id, []).append(
+            dataset.base.acoustic_feature_cache[real_idx]
+        )
+    return enrollment
+
+
+def _speaker_id_from_real_idx(dataset: AcousticCueDataset, real_idx: int) -> str:
+    return extract_speaker_id(dataset.base.all_file_paths[real_idx])
+
+
+def _mean(values: list[float]) -> float:
+    return sum(values) / max(len(values), 1)
+
+
+def _variance(values: list[float]) -> float:
+    if len(values) < 2:
+        return 0.0
+    value_mean = _mean(values)
+    return sum((value - value_mean) ** 2 for value in values) / (len(values) - 1)
+
+
+def _estimate_mixed_effects_parameters(dataset: AcousticCueDataset, train_idx):
+    neutral_by_speaker = {}
+    for sample_idx in train_idx:
+        if _label_text(dataset, sample_idx) != "neutral":
+            continue
+        real_idx = dataset.base.sample_indices[sample_idx]
+        speaker_id = _speaker_id_from_real_idx(dataset, real_idx)
+        features = dataset.base.acoustic_feature_cache[real_idx]
+        neutral_by_speaker.setdefault(speaker_id, []).append(features)
+
+    train_neutral_count = sum(len(features) for features in neutral_by_speaker.values())
+    if train_neutral_count == 0:
+        raise ValueError(
+            "mixed_effects baseline estimation requires at least one train-split "
+            "neutral sample."
+        )
+
+    parameters = {}
+    for key in CUE_FEATURE_KEYS:
+        values_by_speaker = {
+            speaker_id: [
+                float(features.get(key, 0.0) or 0.0)
+                for features in speaker_features
+            ]
+            for speaker_id, speaker_features in neutral_by_speaker.items()
+        }
+        all_values = [
+            value
+            for speaker_values in values_by_speaker.values()
+            for value in speaker_values
+        ]
+        global_mean = _mean(all_values)
+        speaker_means = {
+            speaker_id: _mean(speaker_values)
+            for speaker_id, speaker_values in values_by_speaker.items()
+        }
+        residual_sse = sum(
+            (value - speaker_means[speaker_id]) ** 2
+            for speaker_id, speaker_values in values_by_speaker.items()
+            for value in speaker_values
+        )
+        residual_df = train_neutral_count - len(values_by_speaker)
+        residual_variance = residual_sse / residual_df if residual_df > 0 else 0.0
+        mean_variance = _variance(list(speaker_means.values()))
+        mean_inverse_n = _mean([
+            1.0 / len(speaker_values)
+            for speaker_values in values_by_speaker.values()
+        ])
+        speaker_variance = max(
+            0.0,
+            mean_variance - residual_variance * mean_inverse_n,
+        )
+        parameters[key] = {
+            "mu": global_mean,
+            "speaker_variance": speaker_variance,
+            "residual_variance": residual_variance,
+        }
+
+    return parameters, train_neutral_count
+
+
+def apply_mixed_effects_baselines(dataset: AcousticCueDataset, train_idx) -> dict:
+    parameters, train_neutral_count = _estimate_mixed_effects_parameters(
+        dataset,
+        train_idx,
+    )
+    neutral_enrollment = _neutral_enrollment_by_speaker(dataset)
+    target_speakers = sorted(set(dataset.base.speaker_ids))
+    fallback_speakers = []
+
+    for speaker_id in target_speakers:
+        speaker_features = neutral_enrollment.get(speaker_id, [])
+        if not speaker_features:
+            fallback_speakers.append(speaker_id)
+
+        baseline = {
+            key: dict(value)
+            for key, value in dataset.base.speaker_baselines.get(speaker_id, {}).items()
+        }
+        for key, stats in parameters.items():
+            feature_stats = baseline.setdefault(key, {"mean": stats["mu"], "std": 1.0})
+            if not speaker_features:
+                feature_stats["mean"] = stats["mu"]
+                continue
+
+            speaker_values = [
+                float(features.get(key, 0.0) or 0.0)
+                for features in speaker_features
+            ]
+            speaker_mean = _mean(speaker_values)
+            n_s = len(speaker_values)
+            denominator = (
+                stats["speaker_variance"]
+                + stats["residual_variance"] / max(n_s, 1)
+            )
+            lambda_sf = (
+                stats["speaker_variance"] / denominator
+                if denominator > 0.0
+                else 0.0
+            )
+            feature_stats["mean"] = (
+                stats["mu"] + lambda_sf * (speaker_mean - stats["mu"])
+            )
+
+        dataset.base.speaker_baselines[speaker_id] = baseline
+
+    dataset.rebuild_acoustic_cue_annotations()
+    return {
+        "mode": "mixed_effects",
+        "train_neutral_samples": train_neutral_count,
+        "parameters": parameters,
+        "fallback_speakers": fallback_speakers,
+        "fallback_speaker_count": len(fallback_speakers),
+    }
+
+
+def apply_baseline_estimation(dataset: AcousticCueDataset, train_idx, config) -> dict:
+    mode = config["baseline_estimation_mode"]
+    if mode == "speaker_neutral":
+        return {
+            "mode": "speaker_neutral",
+            "train_neutral_samples": None,
+            "parameters": {},
+            "fallback_speakers": [],
+            "fallback_speaker_count": 0,
+        }
+    if mode == "mixed_effects":
+        return apply_mixed_effects_baselines(dataset, train_idx)
+    raise ValueError(f"Unknown baseline_estimation_mode: {mode}")
+
+
+def print_baseline_estimation_summary(summary: dict):
+    print(f"  Baseline estimation mode: {summary['mode']}")
+    if summary["mode"] != "mixed_effects":
+        return
+
+    print(f"  Train neutral samples: {summary['train_neutral_samples']}")
+    print(f"  Mixed-effects fallback speakers: {summary['fallback_speaker_count']}")
+    if summary["fallback_speakers"]:
+        print(f"    {summary['fallback_speakers']}")
+    print("  Mixed-effects parameters:")
+    for key in CUE_FEATURE_KEYS:
+        stats = summary["parameters"][key]
+        print(
+            f"    {key}: "
+            f"mu={stats['mu']:.6f}, "
+            f"sigma_speaker^2={stats['speaker_variance']:.6f}, "
+            f"sigma_residual^2={stats['residual_variance']:.6f}"
+        )
 
 
 def _cue_loss(logits_by_cue, batch, criterion) -> torch.Tensor:
@@ -308,6 +510,8 @@ def train(config):
         val_speakers=config["val_speakers"],
         test_speakers=config["test_speakers"],
     )
+    baseline_summary = apply_baseline_estimation(dataset, train_idx, config)
+    config["baseline_estimation_summary"] = baseline_summary
 
     train_loader = DataLoader(
         Subset(dataset, train_idx),
@@ -345,6 +549,7 @@ def train(config):
     print(f"  Dataset:      {config['dataset']}")
     print(f"  Encoder:      {config['encoder']}")
     print(f"  Baseline mode:{config['speaker_baseline_mode']}")
+    print_baseline_estimation_summary(baseline_summary)
     print(f"  Trainable baseline adapter: {config['trainable_baseline_adapter']}")
     print(f"  Device:       {device}")
     print(f"  Checkpoint:   {config['checkpoint_path']}")
@@ -411,6 +616,10 @@ def train(config):
                     "config": config,
                     "cue_labels": CUE_LABELS,
                     "speaker_baseline_mode": config["speaker_baseline_mode"],
+                    "baseline_estimation_mode": config["baseline_estimation_mode"],
+                    "baseline_estimation_summary": (
+                        config["baseline_estimation_summary"]
+                    ),
                     "trainable_baseline_adapter": (
                         config["trainable_baseline_adapter"]
                     ),
@@ -466,6 +675,16 @@ if __name__ == "__main__":
         choices=["neutral", "emotion_balanced"],
         default="neutral",
         help="Speaker baseline mode used to derive acoustic cue labels.",
+    )
+    parser.add_argument(
+        "--baseline_estimation_mode",
+        choices=BASELINE_ESTIMATION_MODES,
+        default="speaker_neutral",
+        help=(
+            "Statistical speaker-baseline estimation mode. speaker_neutral "
+            "reproduces Q3; mixed_effects applies train-split neutral "
+            "random-intercept partial pooling before classifier training."
+        ),
     )
     parser.add_argument(
         "--trainable_baseline_adapter",

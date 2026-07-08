@@ -12,15 +12,20 @@ from data.dataset import speaker_independent_split
 from data.dataset_configs import DATASET_CONFIGS, get_dataset_config
 from models.compression.compressor import AudioCompressor
 from training.train_acoustic_cue_classifier import (
+    BASELINE_ESTIMATION_MODES,
     CUE_LABELS,
     CUE_NAMES,
     AcousticCueClassifier,
     AcousticCueDataset,
+    apply_baseline_estimation,
+    print_baseline_estimation_summary,
 )
 
 
 def _checkpoint_path(args, dataset_config: dict) -> str:
     tag = f"{args.encoder}_acoustic_cue_classifier_{args.speaker_baseline_mode}"
+    if args.baseline_estimation_mode == "mixed_effects":
+        tag += "_mixed_effects"
     if args.trainable_baseline_adapter:
         tag += "_trainable_baseline"
     return args.checkpoint_path or f"{dataset_config['checkpoint_dir']}/{tag}_best.pt"
@@ -45,6 +50,7 @@ def _build_config(args) -> dict:
         "target_audio_len": args.target_audio_len,
         "hidden_dim": args.hidden_dim,
         "dropout": args.dropout,
+        "baseline_estimation_mode": args.baseline_estimation_mode,
         "trainable_baseline_adapter": args.trainable_baseline_adapter,
         "device": "cuda" if torch.cuda.is_available() else "cpu",
     }
@@ -133,16 +139,22 @@ def evaluate(config):
         "trainable_baseline_adapter",
         config["trainable_baseline_adapter"],
     )
+    baseline_estimation_mode = checkpoint_config.get(
+        "baseline_estimation_mode",
+        config["baseline_estimation_mode"],
+    )
+    config["baseline_estimation_mode"] = baseline_estimation_mode
 
     dataset = AcousticCueDataset(
         config["embeddings_path"],
         speaker_baseline_mode=config["speaker_baseline_mode"],
     )
-    _, _, test_idx = speaker_independent_split(
+    train_idx, _, test_idx = speaker_independent_split(
         dataset,
         val_speakers=config["val_speakers"],
         test_speakers=config["test_speakers"],
     )
+    baseline_summary = apply_baseline_estimation(dataset, train_idx, config)
     loader = DataLoader(
         Subset(dataset, test_idx),
         batch_size=config["batch_size"],
@@ -165,6 +177,7 @@ def evaluate(config):
     print(f"  Dataset:       {config['dataset']}")
     print(f"  Encoder:       {config['encoder']}")
     print(f"  Baseline mode: {config['speaker_baseline_mode']}")
+    print_baseline_estimation_summary(baseline_summary)
     print(f"  Trainable baseline adapter: {trainable_baseline_adapter}")
     print(f"  Device:        {device}")
     print(f"  Checkpoint:    {config['checkpoint_path']}")
@@ -212,6 +225,16 @@ if __name__ == "__main__":
         choices=["neutral", "emotion_balanced"],
         default="neutral",
         help="Speaker baseline mode used to derive acoustic cue labels.",
+    )
+    parser.add_argument(
+        "--baseline_estimation_mode",
+        choices=BASELINE_ESTIMATION_MODES,
+        default="speaker_neutral",
+        help=(
+            "Statistical speaker-baseline estimation mode. speaker_neutral "
+            "reproduces Q3; mixed_effects evaluates the train-split neutral "
+            "random-intercept partial-pooling checkpoint variant."
+        ),
     )
     parser.add_argument(
         "--trainable_baseline_adapter",
