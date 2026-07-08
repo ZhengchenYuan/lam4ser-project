@@ -21,6 +21,8 @@ from training.train_acoustic_cue_classifier import (
 
 def _checkpoint_path(args, dataset_config: dict) -> str:
     tag = f"{args.encoder}_acoustic_cue_classifier_{args.speaker_baseline_mode}"
+    if args.trainable_baseline_adapter:
+        tag += "_trainable_baseline"
     return args.checkpoint_path or f"{dataset_config['checkpoint_dir']}/{tag}_best.pt"
 
 
@@ -43,7 +45,19 @@ def _build_config(args) -> dict:
         "target_audio_len": args.target_audio_len,
         "hidden_dim": args.hidden_dim,
         "dropout": args.dropout,
+        "trainable_baseline_adapter": args.trainable_baseline_adapter,
         "device": "cuda" if torch.cuda.is_available() else "cpu",
+    }
+
+
+def _batch_adapter_inputs(batch, device, enabled: bool):
+    if not enabled:
+        return {}
+
+    return {
+        "acoustic_features": batch["acoustic_features"].to(device),
+        "baseline_features": batch["baseline_features"].to(device),
+        "baseline_stds": batch["baseline_stds"].to(device),
     }
 
 
@@ -56,7 +70,14 @@ def _evaluate(model, compressor, loader, device):
         for batch in loader:
             audio = batch["audio"].to(device)
             audio_compressed = compressor(audio)
-            logits_by_cue = model(audio_compressed)
+            logits_by_cue = model(
+                audio_compressed,
+                **_batch_adapter_inputs(
+                    batch,
+                    device,
+                    model.trainable_baseline_adapter,
+                ),
+            )
 
             for cue_name in CUE_NAMES:
                 preds = logits_by_cue[cue_name].argmax(dim=-1)
@@ -108,6 +129,10 @@ def evaluate(config):
         "target_audio_len",
         config["target_audio_len"],
     )
+    trainable_baseline_adapter = checkpoint_config.get(
+        "trainable_baseline_adapter",
+        config["trainable_baseline_adapter"],
+    )
 
     dataset = AcousticCueDataset(
         config["embeddings_path"],
@@ -130,6 +155,7 @@ def evaluate(config):
         audio_dim=audio_dim,
         hidden_dim=hidden_dim,
         dropout=dropout,
+        trainable_baseline_adapter=trainable_baseline_adapter,
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
 
@@ -139,6 +165,7 @@ def evaluate(config):
     print(f"  Dataset:       {config['dataset']}")
     print(f"  Encoder:       {config['encoder']}")
     print(f"  Baseline mode: {config['speaker_baseline_mode']}")
+    print(f"  Trainable baseline adapter: {trainable_baseline_adapter}")
     print(f"  Device:        {device}")
     print(f"  Checkpoint:    {config['checkpoint_path']}")
     print()
@@ -185,6 +212,14 @@ if __name__ == "__main__":
         choices=["neutral", "emotion_balanced"],
         default="neutral",
         help="Speaker baseline mode used to derive acoustic cue labels.",
+    )
+    parser.add_argument(
+        "--trainable_baseline_adapter",
+        action="store_true",
+        help=(
+            "Use the checkpoint/model variant with the shared trainable "
+            "speaker-baseline adapter."
+        ),
     )
     parser.add_argument("--checkpoint_path", default=None)
 
