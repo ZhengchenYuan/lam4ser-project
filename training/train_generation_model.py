@@ -45,11 +45,29 @@ def _checkpoint_tag(
     encoder: str,
     prompt_type: str,
     speaker_baseline_mode: str,
+    class_weighted_answer_loss: bool = False,
+    class_weight_mode: str = "inverse",
+    class_weight_power: float = 1.0,
+    class_weight_max: float = 5.0,
 ) -> str:
-    if prompt_type in SPEAKER_BASELINE_PROMPT_TYPES:
-        return f"{encoder}_{prompt_type}_{speaker_baseline_mode}_generation"
+    tag = f"{encoder}_{prompt_type}"
 
-    return f"{encoder}_{prompt_type}_generation"
+    if prompt_type in SPEAKER_BASELINE_PROMPT_TYPES:
+        tag += f"_{speaker_baseline_mode}"
+
+    if class_weighted_answer_loss:
+        max_tag = (
+            str(float(class_weight_max))
+            if class_weight_max is not None and class_weight_max > 0
+            else "none"
+        )
+        tag += (
+            f"_weighted_{class_weight_mode}"
+            f"_p{float(class_weight_power)}"
+            f"_m{max_tag}"
+        )
+
+    return f"{tag}_generation"
 
 
 def _max_length_for_prompt_type(prompt_type: str) -> int:
@@ -72,7 +90,7 @@ def _build_config(
     answer_loss_weight: float = 5.0,
     evidence_loss_weight: float = 0.3,
     class_weighted_answer_loss: bool = False,
-    class_weight_mode: str = "balanced",
+    class_weight_mode: str = "inverse",
     class_weight_power: float = 1.0,
     class_weight_max: float = 5.0,
     no_audio: bool = False,
@@ -83,6 +101,10 @@ def _build_config(
         encoder=encoder,
         prompt_type=prompt_type,
         speaker_baseline_mode=speaker_baseline_mode,
+        class_weighted_answer_loss=class_weighted_answer_loss,
+        class_weight_mode=class_weight_mode,
+        class_weight_power=class_weight_power,
+        class_weight_max=class_weight_max,
     )
 
     if lora_rank > 0:
@@ -217,7 +239,7 @@ def train(config):
 
     answer_class_weights = None
     if config["class_weighted_answer_loss"]:
-        answer_class_weights = compute_balanced_class_weights(
+        answer_class_weights = compute_class_weights(
             dataset=dataset,
             train_idx=train_idx,
             mode=config["class_weight_mode"],
@@ -456,7 +478,7 @@ def evaluate_loss(
     return total_loss / len(loader)
 
 
-def compute_balanced_class_weights(
+def compute_class_weights(
     dataset,
     train_idx,
     mode: str,
@@ -464,6 +486,12 @@ def compute_balanced_class_weights(
     max_weight: float,
     device,
 ):
+    """Compute answer-label class weights from the training split only.
+
+    The default ``inverse`` mode follows Andreas's requested formula:
+    weight_c = total_count / count_c. ``balanced`` remains available as the
+    conventional sklearn-style alternative.
+    """
     class_labels = torch.tensor(
         [dataset.class_labels_list[idx].item() for idx in train_idx],
         dtype=torch.long,
@@ -617,7 +645,7 @@ if __name__ == "__main__":
         "--class_weighted_answer_loss",
         action="store_true",
         help=(
-            "Apply train-split balanced class weights to answer-label tokens "
+            "Apply train-split class weights to answer-label tokens "
             "for structured <answer>...</answer> generation targets."
         ),
     )
@@ -625,15 +653,20 @@ if __name__ == "__main__":
     parser.add_argument(
         "--class_weight_mode",
         choices=["balanced", "inverse"],
-        default="balanced",
-        help="Class weighting formula for answer-label tokens.",
+        default="inverse",
+        help=(
+            "Class weighting formula for answer-label tokens. 'inverse' uses "
+            "Andreas's inverse-frequency formula computed on the training "
+            "split, weight_c = total_count / count_c; 'balanced' uses "
+            "weight_c = total_count / (num_classes * count_c)."
+        ),
     )
 
     parser.add_argument(
         "--class_weight_power",
         type=float,
         default=1.0,
-        help="Exponent applied to balanced answer class weights.",
+        help="Exponent applied to answer class weights.",
     )
 
     parser.add_argument(
