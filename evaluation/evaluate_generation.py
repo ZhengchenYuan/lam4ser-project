@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, Subset
 from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix
 
 from data.dataset_configs import DATASET_CONFIGS, get_dataset_config
-from data.generation_dataset import EmoDBGenerationDataset
+from data.generation_dataset import EmoDBGenerationDataset, SPEAKER_BASELINE_PROMPT_TYPES
 from data.dataset import speaker_independent_split
 from data.prompts import LABELS as DEFAULT_LABELS
 from data.tokenizer_utils import build_generation_tokenizer
@@ -58,6 +58,17 @@ ACOUSTIC_CUE_PROMPT_TYPE = "speaker_acoustic_cue_generation"
 CUE_NAMES = ("pitch", "energy", "rhythm", "duration")
 
 
+def _checkpoint_tag(
+    encoder: str,
+    prompt_type: str,
+    speaker_baseline_mode: str,
+) -> str:
+    if prompt_type in SPEAKER_BASELINE_PROMPT_TYPES:
+        return f"{encoder}_{prompt_type}_{speaker_baseline_mode}_generation"
+
+    return f"{encoder}_{prompt_type}_generation"
+
+
 def _max_length_for_prompt_type(prompt_type: str) -> int:
     if prompt_type == ACOUSTIC_CUE_PROMPT_TYPE:
         return 128
@@ -85,9 +96,14 @@ def _build_config(
     generate_evidence: bool = False,
     no_audio: bool = False,
     cue_perturbation: str = "none",
+    speaker_baseline_mode: str = "neutral",
 ) -> dict:
     dataset_config = get_dataset_config(dataset)
-    tag = f"{encoder}_{prompt_type}_generation"
+    tag = _checkpoint_tag(
+        encoder=encoder,
+        prompt_type=prompt_type,
+        speaker_baseline_mode=speaker_baseline_mode,
+    )
     max_new_tokens = _max_new_tokens_for_prompt_type(prompt_type)
 
     if generate_evidence:
@@ -123,6 +139,7 @@ def _build_config(
         "generate_evidence": generate_evidence,
         "no_audio": no_audio,
         "cue_perturbation": cue_perturbation,
+        "speaker_baseline_mode": speaker_baseline_mode,
         "preprocessing_script": dataset_config["preprocessing_script"],
     }
 
@@ -790,6 +807,7 @@ def evaluate(config):
         embeddings_path=config["embeddings_path"],
         prompt_type=config["prompt_type"],
         max_length=config["max_prompt_length"],
+        speaker_baseline_mode=config["speaker_baseline_mode"],
     )
     label_names = [dataset.idx2label[i] for i in range(len(dataset.idx2label))]
 
@@ -853,6 +871,7 @@ def evaluate(config):
     print(f"  Generate evidence: {config['generate_evidence']}")
     print(f"  No audio:    {config['no_audio']}")
     print(f"  Cue perturbation: {config['cue_perturbation']}")
+    print(f"  Speaker baseline mode: {config['speaker_baseline_mode']}")
     print(f"  Max new tokens: {config['max_new_tokens']}")
     print()
 
@@ -1181,6 +1200,16 @@ if __name__ == "__main__":
         help="Evaluation-only perturbation for speaker-relative cue text prompts.",
     )
 
+    parser.add_argument(
+        "--speaker_baseline_mode",
+        choices=["neutral", "emotion_balanced"],
+        default="neutral",
+        help=(
+            "Speaker-relative baseline enrollment mode. Use emotion_balanced "
+            "to reproduce the old one-utterance-per-emotion enrollment behavior."
+        ),
+    )
+
     args = parser.parse_args()
 
     config = _build_config(
@@ -1192,6 +1221,7 @@ if __name__ == "__main__":
         generate_evidence=args.generate_evidence,
         no_audio=args.no_audio,
         cue_perturbation=args.cue_perturbation,
+        speaker_baseline_mode=args.speaker_baseline_mode,
     )
 
     evaluate(config)

@@ -69,6 +69,11 @@ ACOUSTIC_CUE_PROMPT_TYPES = (
     "speaker_acoustic_cue_generation",
 )
 
+SPEAKER_BASELINE_MODES = (
+    "neutral",
+    "emotion_balanced",
+)
+
 
 def extract_speaker_id(file_path: str) -> str:
     """
@@ -98,6 +103,7 @@ class EmoDBGenerationDataset(Dataset):
         max_length: int = 96,
         answer_loss_weight: float = 5.0,
         evidence_loss_weight: float = 0.3,
+        speaker_baseline_mode: str = "neutral",
     ):
         if not os.path.exists(embeddings_path):
             print(
@@ -118,6 +124,12 @@ class EmoDBGenerationDataset(Dataset):
         self.max_length = max_length
         self.answer_loss_weight = answer_loss_weight
         self.evidence_loss_weight = evidence_loss_weight
+        if speaker_baseline_mode not in SPEAKER_BASELINE_MODES:
+            raise ValueError(
+                f"speaker_baseline_mode must be one of {SPEAKER_BASELINE_MODES}. "
+                f"Got: {speaker_baseline_mode}"
+            )
+        self.speaker_baseline_mode = speaker_baseline_mode
         self.use_feature_prompt = "feature" in prompt_type
         self.use_answer_tag_target = prompt_type in ANSWER_TAG_PROMPT_TYPES
         self.use_caption_target = prompt_type in CAPTION_TARGET_PROMPT_TYPES
@@ -171,6 +183,7 @@ class EmoDBGenerationDataset(Dataset):
         self.acoustic_feature_cache = None
         self.speaker_baselines = {}
         self.enrollment_indices = set()
+        self.neutral_fallback_speakers = []
         self.sample_indices = list(range(len(self.embeddings)))
 
         if needs_acoustic_features:
@@ -233,7 +246,15 @@ class EmoDBGenerationDataset(Dataset):
 
         for indices in by_speaker_label.values():
             indices.sort(key=lambda i: os.path.basename(str(self.file_paths[i])))
-            self.enrollment_indices.add(indices[0])
+
+        if self.speaker_baseline_mode == "neutral":
+            self._select_neutral_enrollment(by_speaker_label)
+        elif self.speaker_baseline_mode == "emotion_balanced":
+            self._select_emotion_balanced_enrollment(by_speaker_label)
+        else:
+            raise ValueError(
+                f"Unknown speaker baseline mode: {self.speaker_baseline_mode}"
+            )
 
         self.sample_indices = [
             idx
@@ -251,6 +272,34 @@ class EmoDBGenerationDataset(Dataset):
             for speaker_id, features in enrollment_by_speaker.items()
         }
 
+        self._print_enrollment_summary(
+            by_speaker_label=by_speaker_label,
+            enrollment_by_speaker=enrollment_by_speaker,
+        )
+
+    def _select_emotion_balanced_enrollment(self, by_speaker_label):
+        for indices in by_speaker_label.values():
+            self.enrollment_indices.add(indices[0])
+
+    def _select_neutral_enrollment(self, by_speaker_label):
+        labels_by_speaker = defaultdict(dict)
+        for (speaker_id, label_text), indices in by_speaker_label.items():
+            labels_by_speaker[speaker_id][label_text] = indices
+
+        fallback_speakers = []
+        for speaker_id, labels in labels_by_speaker.items():
+            neutral_indices = labels.get("neutral")
+            if neutral_indices:
+                self.enrollment_indices.add(neutral_indices[0])
+                continue
+
+            fallback_speakers.append(speaker_id)
+            for indices in labels.values():
+                self.enrollment_indices.add(indices[0])
+
+        self.neutral_fallback_speakers = sorted(fallback_speakers)
+
+    def _print_enrollment_summary(self, by_speaker_label, enrollment_by_speaker):
         target_speakers = [
             extract_speaker_id(self.file_paths[idx])
             for idx in self.sample_indices
@@ -273,10 +322,26 @@ class EmoDBGenerationDataset(Dataset):
         self.speaker_ids = [extract_speaker_id(p) for p in self.file_paths]
 
         print("Speaker enrollment summary:")
+        print(f"  Baseline mode:      {self.speaker_baseline_mode}")
+        if self.speaker_baseline_mode == "neutral":
+            print("  Baseline type:      neutral-only where available")
+        else:
+            print("  Baseline type:      one utterance per emotion class")
         print(f"  Speakers:           {len(enrollment_by_speaker)}")
         print(f"  Enrollment samples: {len(self.enrollment_indices)}")
         print(f"  Target samples:     {len(self.sample_indices)}")
         fallback_messages = 0
+
+        if self.speaker_baseline_mode == "neutral":
+            if self.neutral_fallback_speakers:
+                print(
+                    "  Neutral fallback: speakers without neutral samples; "
+                    "using emotion-balanced enrollment: "
+                    f"{self.neutral_fallback_speakers}"
+                )
+                fallback_messages += 1
+            else:
+                print("  Neutral fallback: none")
 
         if partial_enrollment_speakers:
             print(
@@ -301,6 +366,15 @@ class EmoDBGenerationDataset(Dataset):
 
         return str(self.idx2label[int(label_idx)])
 
+    def _baseline_label_for_speaker(self, speaker_id: str) -> str:
+        if (
+            self.speaker_baseline_mode == "neutral"
+            and speaker_id not in self.neutral_fallback_speakers
+        ):
+            return "neutral baseline"
+
+        return "speaker-specific enrollment average"
+
     def _build_prompt_for_sample(self, idx: int) -> str:
         real_idx = self.sample_indices[idx]
 
@@ -320,6 +394,7 @@ class EmoDBGenerationDataset(Dataset):
                 feature_text = acoustic_features_to_speaker_relative_cues(
                     features,
                     baseline,
+                    baseline_label=self._baseline_label_for_speaker(speaker_id),
                 )
             else:
                 feature_text = acoustic_features_to_text(features)
@@ -357,6 +432,7 @@ class EmoDBGenerationDataset(Dataset):
                 caption = acoustic_features_to_speaker_relative_cues(
                     features,
                     baseline,
+                    baseline_label=self._baseline_label_for_speaker(speaker_id),
                 )
                 return f"<answer>{label_text}</answer><caption>{caption}</caption>"
 
@@ -371,6 +447,7 @@ class EmoDBGenerationDataset(Dataset):
                     features,
                     baseline,
                     label_text,
+                    baseline_label=self._baseline_label_for_speaker(speaker_id),
                 )
                 return f"<answer>{label_text}</answer><evidence>{evidence}</evidence>"
 
@@ -389,11 +466,19 @@ class EmoDBGenerationDataset(Dataset):
             caption = acoustic_features_to_speaker_relative_caption(
                 features,
                 baseline,
+                baseline_label=self._baseline_label_for_speaker(speaker_id),
             )
         else:
             caption = acoustic_features_to_global_caption(features)
 
-        reasoning = emotion_reasoning_sentence(label_text)
+        reasoning = emotion_reasoning_sentence(
+            label_text,
+            baseline_label=(
+                self._baseline_label_for_speaker(speaker_id)
+                if self.use_speaker_reasoning
+                else None
+            ),
+        )
 
         if self.prompt_type == "speaker_reasoning_generation_answer_first":
             return f"<answer>{label_text}</answer><think>{caption} {reasoning}</think>"
