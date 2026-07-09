@@ -10,7 +10,12 @@ from torch.utils.data import DataLoader, Subset
 from transformers import get_linear_schedule_with_warmup
 
 from data.dataset_configs import DATASET_CONFIGS, get_dataset_config
-from data.generation_dataset import EmoDBGenerationDataset, SPEAKER_BASELINE_PROMPT_TYPES
+from data.generation_dataset import (
+    BASELINE_ESTIMATION_MODES,
+    EmoDBGenerationDataset,
+    SPEAKER_BASELINE_PROMPT_TYPES,
+    print_baseline_estimation_summary,
+)
 from data.dataset import speaker_independent_split
 from data.tokenizer_utils import build_generation_tokenizer
 from models.compression.compressor import AudioCompressor
@@ -45,15 +50,19 @@ def _checkpoint_tag(
     encoder: str,
     prompt_type: str,
     speaker_baseline_mode: str,
+    baseline_estimation_mode: str = "speaker_neutral",
     class_weighted_answer_loss: bool = False,
     class_weight_mode: str = "inverse",
-    class_weight_power: float = 1.0,
-    class_weight_max: float = 5.0,
+    class_weight_power: float = 0.5,
+    class_weight_max: float = 2.0,
 ) -> str:
     tag = f"{encoder}_{prompt_type}"
 
     if prompt_type in SPEAKER_BASELINE_PROMPT_TYPES:
         tag += f"_{speaker_baseline_mode}"
+
+    if baseline_estimation_mode == "mixed_effects":
+        tag += "_mixed_effects"
 
     if class_weighted_answer_loss:
         max_tag = (
@@ -91,16 +100,18 @@ def _build_config(
     evidence_loss_weight: float = 0.3,
     class_weighted_answer_loss: bool = False,
     class_weight_mode: str = "inverse",
-    class_weight_power: float = 1.0,
-    class_weight_max: float = 5.0,
+    class_weight_power: float = 0.5,
+    class_weight_max: float = 2.0,
     no_audio: bool = False,
     speaker_baseline_mode: str = "neutral",
+    baseline_estimation_mode: str = "speaker_neutral",
 ) -> dict:
     dataset_config = get_dataset_config(dataset)
     tag = _checkpoint_tag(
         encoder=encoder,
         prompt_type=prompt_type,
         speaker_baseline_mode=speaker_baseline_mode,
+        baseline_estimation_mode=baseline_estimation_mode,
         class_weighted_answer_loss=class_weighted_answer_loss,
         class_weight_mode=class_weight_mode,
         class_weight_power=class_weight_power,
@@ -128,6 +139,7 @@ def _build_config(
         "class_weight_max": class_weight_max,
         "no_audio": no_audio,
         "speaker_baseline_mode": speaker_baseline_mode,
+        "baseline_estimation_mode": baseline_estimation_mode,
         "embeddings_path": (
             f"embeddings/{dataset_config['embeddings_prefix']}"
             f"{encoder}_embeddings.pt"
@@ -204,6 +216,14 @@ def train(config):
         val_speakers=config["val_speakers"],
         test_speakers=config["test_speakers"],
     )
+
+    baseline_summary = dataset.apply_baseline_estimation(
+        config["baseline_estimation_mode"],
+        train_idx,
+    )
+    config["baseline_estimation_summary"] = baseline_summary
+    print_baseline_estimation_summary(baseline_summary)
+    print(f"Checkpoint path: {config['checkpoint_path']}")
 
     train_loader = DataLoader(
         Subset(dataset, train_idx),
@@ -304,6 +324,7 @@ def train(config):
     print(f"  Prompt type:  {config['prompt_type']}")
     print(f"  Prompt length:{config['max_prompt_length']}")
     print(f"  Speaker baseline mode: {config['speaker_baseline_mode']}")
+    print(f"  Baseline estimation mode: {config['baseline_estimation_mode']}")
     print(f"  LoRA rank:    {config['lora_rank']}")
     if config["prompt_type"] == "speaker_feature_answer_evidence_generation":
         print(f"  Answer weight:{config['answer_loss_weight']}")
@@ -404,6 +425,8 @@ def train(config):
                     "class_weight_max": config["class_weight_max"],
                     "no_audio": config["no_audio"],
                     "speaker_baseline_mode": config["speaker_baseline_mode"],
+                    "baseline_estimation_mode": config["baseline_estimation_mode"],
+                    "baseline_estimation_summary": baseline_summary,
                     "answer_class_weights": (
                         answer_class_weights.detach().cpu()
                         if answer_class_weights is not None
@@ -665,14 +688,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--class_weight_power",
         type=float,
-        default=1.0,
+        default=0.5,
         help="Exponent applied to answer class weights.",
     )
 
     parser.add_argument(
         "--class_weight_max",
         type=float,
-        default=5.0,
+        default=2.0,
         help="Maximum clipped answer class weight; set <= 0 to disable clipping.",
     )
 
@@ -693,6 +716,19 @@ if __name__ == "__main__":
         ),
     )
 
+    parser.add_argument(
+        "--baseline_estimation_mode",
+        choices=BASELINE_ESTIMATION_MODES,
+        default="speaker_neutral",
+        help=(
+            "Statistical speaker baseline estimator for generation prompts. "
+            "'speaker_neutral' preserves the Q1/Q2 fixed enrollment baseline; "
+            "'mixed_effects' applies mixed-effects speaker baseline estimation "
+            "inside the full audio-conditioned generation model before "
+            "generation targets are built."
+        ),
+    )
+
     args = parser.parse_args()
 
     config = _build_config(
@@ -710,6 +746,7 @@ if __name__ == "__main__":
         class_weight_max=args.class_weight_max,
         no_audio=args.no_audio,
         speaker_baseline_mode=args.speaker_baseline_mode,
+        baseline_estimation_mode=args.baseline_estimation_mode,
     )
 
     smoke_test(config)

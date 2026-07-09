@@ -17,6 +17,43 @@ from features.feature_prompt import (
 )
 
 
+MIXED_EFFECTS_BASELINE_FEATURE_KEYS = (
+    "pitch_mean",
+    "energy_mean",
+    "tempo",
+    "duration",
+)
+
+BASELINE_ESTIMATION_MODES = (
+    "speaker_neutral",
+    "mixed_effects",
+)
+
+
+def print_baseline_estimation_summary(summary: dict):
+    print("Baseline estimation summary:")
+    print(f"  Mode: {summary['mode']}")
+
+    if summary["mode"] != "mixed_effects":
+        return
+
+    print(f"  Train neutral samples: {summary['train_neutral_samples']}")
+    for feature_name, stats in summary["parameters"].items():
+        print(
+            f"  {feature_name}: "
+            f"mu={stats['mu']:.6f}, "
+            f"sigma_speaker^2={stats['speaker_variance']:.6f}, "
+            f"sigma_residual^2={stats['residual_variance']:.6f}"
+        )
+
+    if summary["fallback_speakers"]:
+        print(
+            "  Fallback to global mean for speakers without neutral enrollment: "
+            f"{summary['fallback_speakers']}"
+        )
+    else:
+        print("  Fallback to global mean: none")
+
 GENERATION_PROMPT_TYPES = (
     "generation",
     "feature_generation",
@@ -218,6 +255,9 @@ class EmoDBGenerationDataset(Dataset):
         if self.use_speaker_baseline:
             self._build_enrollment_sets()
 
+        self._rebuild_generation_samples()
+
+    def _rebuild_generation_samples(self):
         self.input_ids_list = []
         self.lm_labels_list = []
         self.loss_weights_list = []
@@ -365,6 +405,168 @@ class EmoDBGenerationDataset(Dataset):
             return str(self.idx2label[int(label_idx)])
 
         return str(self.idx2label[int(label_idx)])
+
+    def _sample_label_text(self, sample_idx: int) -> str:
+        real_idx = self.sample_indices[sample_idx]
+        return self._label_to_text(self.labels[real_idx])
+
+    def _speaker_for_real_idx(self, real_idx: int) -> str:
+        return extract_speaker_id(self.all_file_paths[real_idx])
+
+    def _mean(self, values: list[float]) -> float:
+        return sum(values) / max(len(values), 1)
+
+    def _variance(self, values: list[float]) -> float:
+        if len(values) < 2:
+            return 0.0
+        mean_value = self._mean(values)
+        return sum((value - mean_value) ** 2 for value in values) / (len(values) - 1)
+
+    def _train_neutral_features_by_speaker(self, train_idx):
+        features_by_speaker = defaultdict(list)
+        for sample_idx in train_idx:
+            if self._sample_label_text(sample_idx) != "neutral":
+                continue
+            real_idx = self.sample_indices[sample_idx]
+            speaker_id = self._speaker_for_real_idx(real_idx)
+            features_by_speaker[speaker_id].append(self.acoustic_feature_cache[real_idx])
+        return features_by_speaker
+
+    def _neutral_enrollment_features_by_speaker(self):
+        features_by_speaker = defaultdict(list)
+        for real_idx in sorted(self.enrollment_indices):
+            if self._label_to_text(self.labels[real_idx]) != "neutral":
+                continue
+            speaker_id = self._speaker_for_real_idx(real_idx)
+            features_by_speaker[speaker_id].append(self.acoustic_feature_cache[real_idx])
+        return features_by_speaker
+
+    def _estimate_mixed_effects_parameters(self, train_idx):
+        neutral_by_speaker = self._train_neutral_features_by_speaker(train_idx)
+        train_neutral_count = sum(
+            len(speaker_features)
+            for speaker_features in neutral_by_speaker.values()
+        )
+        if train_neutral_count == 0:
+            raise ValueError(
+                "mixed_effects baseline estimation requires at least one "
+                "train-split neutral sample."
+            )
+
+        parameters = {}
+        for key in MIXED_EFFECTS_BASELINE_FEATURE_KEYS:
+            values_by_speaker = {
+                speaker_id: [
+                    float(features.get(key, 0.0) or 0.0)
+                    for features in speaker_features
+                ]
+                for speaker_id, speaker_features in neutral_by_speaker.items()
+            }
+            all_values = [
+                value
+                for speaker_values in values_by_speaker.values()
+                for value in speaker_values
+            ]
+            global_mean = self._mean(all_values)
+            speaker_means = {
+                speaker_id: self._mean(speaker_values)
+                for speaker_id, speaker_values in values_by_speaker.items()
+            }
+            residual_sse = sum(
+                (value - speaker_means[speaker_id]) ** 2
+                for speaker_id, speaker_values in values_by_speaker.items()
+                for value in speaker_values
+            )
+            residual_df = train_neutral_count - len(values_by_speaker)
+            residual_variance = residual_sse / residual_df if residual_df > 0 else 0.0
+            mean_variance = self._variance(list(speaker_means.values()))
+            mean_inverse_n = self._mean([
+                1.0 / len(speaker_values)
+                for speaker_values in values_by_speaker.values()
+            ])
+            speaker_variance = max(
+                0.0,
+                mean_variance - residual_variance * mean_inverse_n,
+            )
+            parameters[key] = {
+                "mu": global_mean,
+                "speaker_variance": speaker_variance,
+                "residual_variance": residual_variance,
+            }
+
+        return parameters, train_neutral_count
+
+    def apply_baseline_estimation(self, mode: str, train_idx) -> dict:
+        if mode == "speaker_neutral":
+            return {
+                "mode": "speaker_neutral",
+                "train_neutral_samples": None,
+                "parameters": {},
+                "fallback_speakers": [],
+                "fallback_speaker_count": 0,
+            }
+        if mode != "mixed_effects":
+            raise ValueError(f"Unknown baseline_estimation_mode: {mode}")
+        if not self.use_speaker_baseline:
+            raise ValueError(
+                "mixed_effects baseline estimation requires a speaker-baseline "
+                "generation prompt type."
+            )
+
+        parameters, train_neutral_count = self._estimate_mixed_effects_parameters(
+            train_idx
+        )
+        neutral_enrollment = self._neutral_enrollment_features_by_speaker()
+        target_speakers = sorted(set(self.speaker_ids or []))
+        fallback_speakers = []
+
+        for speaker_id in target_speakers:
+            speaker_features = neutral_enrollment.get(speaker_id, [])
+            if not speaker_features:
+                fallback_speakers.append(speaker_id)
+
+            baseline = {
+                key: dict(value)
+                for key, value in self.speaker_baselines.get(speaker_id, {}).items()
+            }
+            for key, stats in parameters.items():
+                feature_stats = baseline.setdefault(
+                    key,
+                    {"mean": stats["mu"], "std": 1.0},
+                )
+                if not speaker_features:
+                    feature_stats["mean"] = stats["mu"]
+                    continue
+
+                speaker_values = [
+                    float(features.get(key, 0.0) or 0.0)
+                    for features in speaker_features
+                ]
+                speaker_mean = self._mean(speaker_values)
+                n_s = len(speaker_values)
+                denominator = (
+                    stats["speaker_variance"]
+                    + stats["residual_variance"] / max(n_s, 1)
+                )
+                lambda_sf = (
+                    stats["speaker_variance"] / denominator
+                    if denominator > 0.0
+                    else 0.0
+                )
+                feature_stats["mean"] = (
+                    stats["mu"] + lambda_sf * (speaker_mean - stats["mu"])
+                )
+
+            self.speaker_baselines[speaker_id] = baseline
+
+        self._rebuild_generation_samples()
+        return {
+            "mode": "mixed_effects",
+            "train_neutral_samples": train_neutral_count,
+            "parameters": parameters,
+            "fallback_speakers": fallback_speakers,
+            "fallback_speaker_count": len(fallback_speakers),
+        }
 
     def _baseline_label_for_speaker(self, speaker_id: str) -> str:
         if (
