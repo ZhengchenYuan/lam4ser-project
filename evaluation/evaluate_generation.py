@@ -13,7 +13,12 @@ from torch.utils.data import DataLoader, Subset
 from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix
 
 from data.dataset_configs import DATASET_CONFIGS, get_dataset_config
-from data.generation_dataset import EmoDBGenerationDataset, SPEAKER_BASELINE_PROMPT_TYPES
+from data.generation_dataset import (
+    BASELINE_ESTIMATION_MODES,
+    EmoDBGenerationDataset,
+    SPEAKER_BASELINE_PROMPT_TYPES,
+    print_baseline_estimation_summary,
+)
 from data.dataset import speaker_independent_split
 from data.prompts import LABELS as DEFAULT_LABELS
 from data.tokenizer_utils import build_generation_tokenizer
@@ -62,15 +67,19 @@ def _checkpoint_tag(
     encoder: str,
     prompt_type: str,
     speaker_baseline_mode: str,
+    baseline_estimation_mode: str = "speaker_neutral",
     class_weighted_answer_loss: bool = False,
     class_weight_mode: str = "inverse",
-    class_weight_power: float = 1.0,
-    class_weight_max: float = 5.0,
+    class_weight_power: float = 0.5,
+    class_weight_max: float = 2.0,
 ) -> str:
     tag = f"{encoder}_{prompt_type}"
 
     if prompt_type in SPEAKER_BASELINE_PROMPT_TYPES:
         tag += f"_{speaker_baseline_mode}"
+
+    if baseline_estimation_mode == "mixed_effects":
+        tag += "_mixed_effects"
 
     if class_weighted_answer_loss:
         max_tag = (
@@ -115,16 +124,18 @@ def _build_config(
     no_audio: bool = False,
     cue_perturbation: str = "none",
     speaker_baseline_mode: str = "neutral",
+    baseline_estimation_mode: str = "speaker_neutral",
     class_weighted_answer_loss: bool = False,
     class_weight_mode: str = "inverse",
-    class_weight_power: float = 1.0,
-    class_weight_max: float = 5.0,
+    class_weight_power: float = 0.5,
+    class_weight_max: float = 2.0,
 ) -> dict:
     dataset_config = get_dataset_config(dataset)
     tag = _checkpoint_tag(
         encoder=encoder,
         prompt_type=prompt_type,
         speaker_baseline_mode=speaker_baseline_mode,
+        baseline_estimation_mode=baseline_estimation_mode,
         class_weighted_answer_loss=class_weighted_answer_loss,
         class_weight_mode=class_weight_mode,
         class_weight_power=class_weight_power,
@@ -166,6 +177,7 @@ def _build_config(
         "no_audio": no_audio,
         "cue_perturbation": cue_perturbation,
         "speaker_baseline_mode": speaker_baseline_mode,
+        "baseline_estimation_mode": baseline_estimation_mode,
         "class_weighted_answer_loss": class_weighted_answer_loss,
         "class_weight_mode": class_weight_mode,
         "class_weight_power": class_weight_power,
@@ -832,6 +844,13 @@ def evaluate(config):
     adapter_dim = checkpoint_config.get("adapter_dim", config["adapter_dim"])
     dropout = checkpoint_config.get("dropout", config["dropout"])
     lora_rank = checkpoint.get("lora_rank", checkpoint_config.get("lora_rank", 0))
+    config["baseline_estimation_mode"] = checkpoint.get(
+        "baseline_estimation_mode",
+        checkpoint_config.get(
+            "baseline_estimation_mode",
+            config["baseline_estimation_mode"],
+        ),
+    )
 
     dataset = EmoDBGenerationDataset(
         embeddings_path=config["embeddings_path"],
@@ -841,11 +860,16 @@ def evaluate(config):
     )
     label_names = [dataset.idx2label[i] for i in range(len(dataset.idx2label))]
 
-    _, _, test_idx = speaker_independent_split(
+    train_idx, _, test_idx = speaker_independent_split(
         dataset,
         val_speakers=config["val_speakers"],
         test_speakers=config["test_speakers"],
     )
+    baseline_summary = dataset.apply_baseline_estimation(
+        config["baseline_estimation_mode"],
+        train_idx,
+    )
+    print_baseline_estimation_summary(baseline_summary)
     prompt_overrides = build_eval_prompt_overrides(
         dataset,
         test_idx,
@@ -902,6 +926,7 @@ def evaluate(config):
     print(f"  No audio:    {config['no_audio']}")
     print(f"  Cue perturbation: {config['cue_perturbation']}")
     print(f"  Speaker baseline mode: {config['speaker_baseline_mode']}")
+    print(f"  Baseline estimation mode: {config['baseline_estimation_mode']}")
     print(f"  Class-weighted checkpoint: {config['class_weighted_answer_loss']}")
     print(f"  Max new tokens: {config['max_new_tokens']}")
     print()
@@ -1242,6 +1267,19 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        "--baseline_estimation_mode",
+        choices=BASELINE_ESTIMATION_MODES,
+        default="speaker_neutral",
+        help=(
+            "Statistical speaker baseline estimator used by the checkpoint "
+            "naming variant and evaluation dataset. 'speaker_neutral' preserves "
+            "Q1/Q2 fixed enrollment baselines; 'mixed_effects' applies "
+            "mixed-effects speaker baseline estimation in the full "
+            "audio-conditioned generation model."
+        ),
+    )
+
+    parser.add_argument(
         "--class_weighted_answer_loss",
         action="store_true",
         help=(
@@ -1265,14 +1303,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--class_weight_power",
         type=float,
-        default=1.0,
+        default=0.5,
         help="Class weight power used by the checkpoint naming variant.",
     )
 
     parser.add_argument(
         "--class_weight_max",
         type=float,
-        default=5.0,
+        default=2.0,
         help="Class weight max used by the checkpoint naming variant.",
     )
 
@@ -1288,6 +1326,7 @@ if __name__ == "__main__":
         no_audio=args.no_audio,
         cue_perturbation=args.cue_perturbation,
         speaker_baseline_mode=args.speaker_baseline_mode,
+        baseline_estimation_mode=args.baseline_estimation_mode,
         class_weighted_answer_loss=args.class_weighted_answer_loss,
         class_weight_mode=args.class_weight_mode,
         class_weight_power=args.class_weight_power,
