@@ -10,7 +10,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
-from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    confusion_matrix,
+    f1_score,
+    recall_score,
+)
 
 from data.dataset_configs import DATASET_CONFIGS, get_dataset_config
 from data.generation_dataset import (
@@ -72,6 +78,7 @@ def _checkpoint_tag(
     class_weight_mode: str = "inverse",
     class_weight_power: float = 0.5,
     class_weight_max: float = 2.0,
+    disable_input_cue_text: bool = False,
 ) -> str:
     tag = f"{encoder}_{prompt_type}"
 
@@ -80,6 +87,9 @@ def _checkpoint_tag(
 
     if baseline_estimation_mode == "mixed_effects":
         tag += "_mixed_effects"
+
+    if disable_input_cue_text:
+        tag += "_no_input_cues"
 
     if class_weighted_answer_loss:
         max_tag = (
@@ -129,6 +139,7 @@ def _build_config(
     class_weight_mode: str = "inverse",
     class_weight_power: float = 0.5,
     class_weight_max: float = 2.0,
+    disable_input_cue_text: bool = False,
 ) -> dict:
     dataset_config = get_dataset_config(dataset)
     tag = _checkpoint_tag(
@@ -140,6 +151,7 @@ def _build_config(
         class_weight_mode=class_weight_mode,
         class_weight_power=class_weight_power,
         class_weight_max=class_weight_max,
+        disable_input_cue_text=disable_input_cue_text,
     )
     max_new_tokens = _max_new_tokens_for_prompt_type(prompt_type)
 
@@ -182,6 +194,7 @@ def _build_config(
         "class_weight_mode": class_weight_mode,
         "class_weight_power": class_weight_power,
         "class_weight_max": class_weight_max,
+        "disable_input_cue_text": disable_input_cue_text,
         "preprocessing_script": dataset_config["preprocessing_script"],
     }
 
@@ -541,11 +554,19 @@ def _print_classification_metrics(y_true, y_pred, label_names: list[str]):
         average="weighted",
         zero_division=0,
     )
+    uar = recall_score(
+        y_true,
+        y_pred,
+        labels=label_names,
+        average="macro",
+        zero_division=0,
+    )
     invalid_count = sum(1 for pred in y_pred if pred == "invalid")
     validity = 1.0 - invalid_count / max(len(y_pred), 1)
 
     print(f"  Accuracy:                 {acc:.4f}")
     print(f"  Weighted F1:              {weighted_f1:.4f}")
+    print(f"  UAR (macro recall):       {uar:.4f}")
     print(f"  Generated label validity: {validity:.4f}")
     print()
 
@@ -857,6 +878,7 @@ def evaluate(config):
         prompt_type=config["prompt_type"],
         max_length=config["max_prompt_length"],
         speaker_baseline_mode=config["speaker_baseline_mode"],
+        disable_input_cue_text=config["disable_input_cue_text"],
     )
     label_names = [dataset.idx2label[i] for i in range(len(dataset.idx2label))]
 
@@ -927,6 +949,7 @@ def evaluate(config):
     print(f"  Cue perturbation: {config['cue_perturbation']}")
     print(f"  Speaker baseline mode: {config['speaker_baseline_mode']}")
     print(f"  Baseline estimation mode: {config['baseline_estimation_mode']}")
+    print(f"  Disable input cue text: {config['disable_input_cue_text']}")
     print(f"  Class-weighted checkpoint: {config['class_weighted_answer_loss']}")
     print(f"  Max new tokens: {config['max_new_tokens']}")
     print()
@@ -1250,6 +1273,16 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        "--disable_input_cue_text",
+        action="store_true",
+        help=(
+            "Suppress speaker-relative acoustic cue text in "
+            "speaker_feature_answer_generation prompts while retaining audio "
+            "fusion, speaker enrollment, and baseline estimation."
+        ),
+    )
+
+    parser.add_argument(
         "--cue_perturbation",
         default="none",
         choices=["none", "invert", "shuffle"],
@@ -1331,6 +1364,7 @@ if __name__ == "__main__":
         class_weight_mode=args.class_weight_mode,
         class_weight_power=args.class_weight_power,
         class_weight_max=args.class_weight_max,
+        disable_input_cue_text=args.disable_input_cue_text,
     )
 
     evaluate(config)

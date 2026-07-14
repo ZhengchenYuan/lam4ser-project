@@ -55,6 +55,7 @@ def _checkpoint_tag(
     class_weight_mode: str = "inverse",
     class_weight_power: float = 0.5,
     class_weight_max: float = 2.0,
+    disable_input_cue_text: bool = False,
 ) -> str:
     tag = f"{encoder}_{prompt_type}"
 
@@ -63,6 +64,9 @@ def _checkpoint_tag(
 
     if baseline_estimation_mode == "mixed_effects":
         tag += "_mixed_effects"
+
+    if disable_input_cue_text:
+        tag += "_no_input_cues"
 
     if class_weighted_answer_loss:
         max_tag = (
@@ -105,6 +109,7 @@ def _build_config(
     no_audio: bool = False,
     speaker_baseline_mode: str = "neutral",
     baseline_estimation_mode: str = "speaker_neutral",
+    disable_input_cue_text: bool = False,
 ) -> dict:
     dataset_config = get_dataset_config(dataset)
     tag = _checkpoint_tag(
@@ -116,6 +121,7 @@ def _build_config(
         class_weight_mode=class_weight_mode,
         class_weight_power=class_weight_power,
         class_weight_max=class_weight_max,
+        disable_input_cue_text=disable_input_cue_text,
     )
 
     if lora_rank > 0:
@@ -140,6 +146,7 @@ def _build_config(
         "no_audio": no_audio,
         "speaker_baseline_mode": speaker_baseline_mode,
         "baseline_estimation_mode": baseline_estimation_mode,
+        "disable_input_cue_text": disable_input_cue_text,
         "embeddings_path": (
             f"embeddings/{dataset_config['embeddings_prefix']}"
             f"{encoder}_embeddings.pt"
@@ -200,6 +207,7 @@ def train(config):
         answer_loss_weight=config["answer_loss_weight"],
         evidence_loss_weight=config["evidence_loss_weight"],
         speaker_baseline_mode=config["speaker_baseline_mode"],
+        disable_input_cue_text=config["disable_input_cue_text"],
     )
 
     if (
@@ -325,6 +333,7 @@ def train(config):
     print(f"  Prompt length:{config['max_prompt_length']}")
     print(f"  Speaker baseline mode: {config['speaker_baseline_mode']}")
     print(f"  Baseline estimation mode: {config['baseline_estimation_mode']}")
+    print(f"  Disable input cue text: {config['disable_input_cue_text']}")
     print(f"  LoRA rank:    {config['lora_rank']}")
     if config["prompt_type"] == "speaker_feature_answer_evidence_generation":
         print(f"  Answer weight:{config['answer_loss_weight']}")
@@ -426,6 +435,7 @@ def train(config):
                     "no_audio": config["no_audio"],
                     "speaker_baseline_mode": config["speaker_baseline_mode"],
                     "baseline_estimation_mode": config["baseline_estimation_mode"],
+                    "disable_input_cue_text": config["disable_input_cue_text"],
                     "baseline_estimation_summary": baseline_summary,
                     "answer_class_weights": (
                         answer_class_weights.detach().cpu()
@@ -706,6 +716,16 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        "--disable_input_cue_text",
+        action="store_true",
+        help=(
+            "Suppress speaker-relative acoustic cue text in "
+            "speaker_feature_answer_generation prompts while retaining audio "
+            "fusion, speaker enrollment, and baseline estimation."
+        ),
+    )
+
+    parser.add_argument(
         "--speaker_baseline_mode",
         choices=["neutral", "emotion_balanced"],
         default="neutral",
@@ -747,6 +767,7 @@ if __name__ == "__main__":
         no_audio=args.no_audio,
         speaker_baseline_mode=args.speaker_baseline_mode,
         baseline_estimation_mode=args.baseline_estimation_mode,
+        disable_input_cue_text=args.disable_input_cue_text,
     )
 
     smoke_test(config)

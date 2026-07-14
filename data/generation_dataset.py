@@ -141,6 +141,7 @@ class EmoDBGenerationDataset(Dataset):
         answer_loss_weight: float = 5.0,
         evidence_loss_weight: float = 0.3,
         speaker_baseline_mode: str = "neutral",
+        disable_input_cue_text: bool = False,
     ):
         if not os.path.exists(embeddings_path):
             print(
@@ -167,6 +168,7 @@ class EmoDBGenerationDataset(Dataset):
                 f"Got: {speaker_baseline_mode}"
             )
         self.speaker_baseline_mode = speaker_baseline_mode
+        self.disable_input_cue_text = disable_input_cue_text
         self.use_feature_prompt = "feature" in prompt_type
         self.use_answer_tag_target = prompt_type in ANSWER_TAG_PROMPT_TYPES
         self.use_caption_target = prompt_type in CAPTION_TARGET_PROMPT_TYPES
@@ -581,6 +583,12 @@ class EmoDBGenerationDataset(Dataset):
         real_idx = self.sample_indices[idx]
 
         if self.use_feature_prompt:
+            if (
+                self.disable_input_cue_text
+                and self.prompt_type == "speaker_feature_answer_generation"
+            ):
+                return get_prompt("answer_generation", labels=self.label_names)
+
             features = self.acoustic_feature_cache[real_idx]
 
             if self.prompt_type in (
