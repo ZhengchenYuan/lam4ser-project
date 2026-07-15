@@ -42,6 +42,7 @@ GENERATION_PROMPT_TYPES = [
     "reasoning_generation_global",
     "speaker_reasoning_generation",
     "speaker_reasoning_generation_answer_first",
+    "speaker_label_blind_rationale_generation",
     "speaker_acoustic_cue_generation",
 ]
 
@@ -49,6 +50,7 @@ REASONING_PROMPT_TYPES = {
     "reasoning_generation_global",
     "speaker_reasoning_generation",
     "speaker_reasoning_generation_answer_first",
+    "speaker_label_blind_rationale_generation",
 }
 
 ANSWER_TAG_PROMPT_TYPES = REASONING_PROMPT_TYPES | {
@@ -109,6 +111,8 @@ def _checkpoint_tag(
 def _max_length_for_prompt_type(prompt_type: str) -> int:
     if prompt_type == ACOUSTIC_CUE_PROMPT_TYPE:
         return 128
+    if prompt_type == "speaker_label_blind_rationale_generation":
+        return 384
     if "reasoning_generation" in prompt_type:
         return 224
     if "feature" in prompt_type:
@@ -119,6 +123,8 @@ def _max_length_for_prompt_type(prompt_type: str) -> int:
 def _max_new_tokens_for_prompt_type(prompt_type: str) -> int:
     if prompt_type == ACOUSTIC_CUE_PROMPT_TYPE:
         return 32
+    if prompt_type == "speaker_label_blind_rationale_generation":
+        return 192
     if prompt_type in REASONING_PROMPT_TYPES:
         return 96
     return 5
@@ -140,6 +146,7 @@ def _build_config(
     class_weight_power: float = 0.5,
     class_weight_max: float = 2.0,
     disable_input_cue_text: bool = False,
+    cot_annotations_path: str | None = None,
 ) -> dict:
     dataset_config = get_dataset_config(dataset)
     tag = _checkpoint_tag(
@@ -195,6 +202,7 @@ def _build_config(
         "class_weight_power": class_weight_power,
         "class_weight_max": class_weight_max,
         "disable_input_cue_text": disable_input_cue_text,
+        "cot_annotations_path": cot_annotations_path,
         "preprocessing_script": dataset_config["preprocessing_script"],
     }
 
@@ -879,6 +887,7 @@ def evaluate(config):
         max_length=config["max_prompt_length"],
         speaker_baseline_mode=config["speaker_baseline_mode"],
         disable_input_cue_text=config["disable_input_cue_text"],
+        cot_annotations_path=config["cot_annotations_path"],
     )
     label_names = [dataset.idx2label[i] for i in range(len(dataset.idx2label))]
 
@@ -950,6 +959,8 @@ def evaluate(config):
     print(f"  Speaker baseline mode: {config['speaker_baseline_mode']}")
     print(f"  Baseline estimation mode: {config['baseline_estimation_mode']}")
     print(f"  Disable input cue text: {config['disable_input_cue_text']}")
+    if config["cot_annotations_path"]:
+        print(f"  CoT annotations: {config['cot_annotations_path']}")
     print(f"  Class-weighted checkpoint: {config['class_weighted_answer_loss']}")
     print(f"  Max new tokens: {config['max_new_tokens']}")
     print()
@@ -1283,6 +1294,12 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        "--cot_annotations_path",
+        default=None,
+        help="JSONL annotations for speaker_label_blind_rationale_generation.",
+    )
+
+    parser.add_argument(
         "--cue_perturbation",
         default="none",
         choices=["none", "invert", "shuffle"],
@@ -1365,6 +1382,7 @@ if __name__ == "__main__":
         class_weight_power=args.class_weight_power,
         class_weight_max=args.class_weight_max,
         disable_input_cue_text=args.disable_input_cue_text,
+        cot_annotations_path=args.cot_annotations_path,
     )
 
     evaluate(config)

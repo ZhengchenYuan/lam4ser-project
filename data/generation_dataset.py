@@ -1,3 +1,4 @@
+import json
 import os
 from collections import defaultdict
 import torch
@@ -15,6 +16,9 @@ from features.feature_prompt import (
     emotion_reasoning_sentence,
     speaker_relative_evidence_sentence,
 )
+
+
+LABEL_BLIND_RATIONALE_PROMPT_VERSION = "aibo_label_blind_rationale_v1"
 
 
 MIXED_EFFECTS_BASELINE_FEATURE_KEYS = (
@@ -64,6 +68,7 @@ GENERATION_PROMPT_TYPES = (
     "reasoning_generation_global",
     "speaker_reasoning_generation",
     "speaker_reasoning_generation_answer_first",
+    "speaker_label_blind_rationale_generation",
     "speaker_acoustic_cue_generation",
 )
 
@@ -86,11 +91,13 @@ REASONING_PROMPT_TYPES = (
     "reasoning_generation_global",
     "speaker_reasoning_generation",
     "speaker_reasoning_generation_answer_first",
+    "speaker_label_blind_rationale_generation",
 )
 
 SPEAKER_REASONING_PROMPT_TYPES = (
     "speaker_reasoning_generation",
     "speaker_reasoning_generation_answer_first",
+    "speaker_label_blind_rationale_generation",
 )
 
 SPEAKER_BASELINE_PROMPT_TYPES = (
@@ -99,6 +106,7 @@ SPEAKER_BASELINE_PROMPT_TYPES = (
     "speaker_feature_answer_evidence_generation",
     "speaker_reasoning_generation",
     "speaker_reasoning_generation_answer_first",
+    "speaker_label_blind_rationale_generation",
     "speaker_acoustic_cue_generation",
 )
 
@@ -142,6 +150,7 @@ class EmoDBGenerationDataset(Dataset):
         evidence_loss_weight: float = 0.3,
         speaker_baseline_mode: str = "neutral",
         disable_input_cue_text: bool = False,
+        cot_annotations_path: str | None = None,
     ):
         if not os.path.exists(embeddings_path):
             print(
@@ -169,6 +178,8 @@ class EmoDBGenerationDataset(Dataset):
             )
         self.speaker_baseline_mode = speaker_baseline_mode
         self.disable_input_cue_text = disable_input_cue_text
+        self.cot_annotations_path = cot_annotations_path
+        self.cot_annotations = self._load_cot_annotations(cot_annotations_path)
         self.use_feature_prompt = "feature" in prompt_type
         self.use_answer_tag_target = prompt_type in ANSWER_TAG_PROMPT_TYPES
         self.use_caption_target = prompt_type in CAPTION_TARGET_PROMPT_TYPES
@@ -258,6 +269,42 @@ class EmoDBGenerationDataset(Dataset):
             self._build_enrollment_sets()
 
         self._rebuild_generation_samples()
+
+    def _load_cot_annotations(self, path: str | None) -> dict[str, dict]:
+        if self.prompt_type != "speaker_label_blind_rationale_generation":
+            return {}
+        if not path:
+            raise ValueError(
+                "speaker_label_blind_rationale_generation requires "
+                "cot_annotations_path."
+            )
+        annotations = {}
+        with open(path, encoding="utf-8") as fp:
+            for line_number, line in enumerate(fp, start=1):
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                if (
+                    record.get("prompt_version")
+                    != LABEL_BLIND_RATIONALE_PROMPT_VERSION
+                ):
+                    raise ValueError(
+                        f"Incompatible rationale annotation at {path}:{line_number}; "
+                        f"expected prompt_version="
+                        f"{LABEL_BLIND_RATIONALE_PROMPT_VERSION}."
+                    )
+                sample_id = str(record.get("sample_id", "")).strip()
+                think = str(record.get("think", "")).strip()
+                answer = str(record.get("answer", "")).strip().lower()
+                if not sample_id or not think or not answer:
+                    raise ValueError(
+                        f"Invalid CoT annotation at {path}:{line_number}; "
+                        "sample_id, think, and answer are required."
+                    )
+                if sample_id in annotations:
+                    raise ValueError(f"Duplicate CoT annotation: {sample_id}")
+                annotations[sample_id] = record
+        return annotations
 
     def _rebuild_generation_samples(self):
         self.input_ids_list = []
@@ -618,6 +665,22 @@ class EmoDBGenerationDataset(Dataset):
         return get_prompt(self.prompt_type, labels=self.label_names)
 
     def _build_target_for_sample(self, real_idx: int, label_text: str) -> str:
+        if self.prompt_type == "speaker_label_blind_rationale_generation":
+            sample_id = os.path.splitext(
+                os.path.basename(str(self.all_file_paths[real_idx]))
+            )[0]
+            annotation = self.cot_annotations.get(sample_id)
+            if annotation is None:
+                raise KeyError(f"Missing CoT annotation for sample: {sample_id}")
+            answer = str(annotation["answer"]).strip().lower()
+            if answer != label_text:
+                raise ValueError(
+                    f"CoT answer mismatch for {sample_id}: annotation={answer}, "
+                    f"dataset={label_text}"
+                )
+            think = str(annotation["think"]).strip()
+            return f"<think>{think}</think><answer>{label_text}</answer>"
+
         if not self.use_reasoning_target:
             if self.use_acoustic_cue_target:
                 features = self.acoustic_feature_cache[real_idx]
