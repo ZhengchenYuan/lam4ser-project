@@ -69,6 +69,7 @@ LABEL_CONSTRAINED_PROMPT_TYPES = {
 
 ACOUSTIC_CUE_PROMPT_TYPE = "speaker_acoustic_cue_generation"
 CUE_NAMES = ("pitch", "energy", "rhythm", "duration")
+LABEL_BLIND_RATIONALE_PROMPT_TYPE = "speaker_label_blind_rationale_generation"
 
 
 def _checkpoint_tag(
@@ -386,6 +387,55 @@ def parse_acoustic_cues(text: str) -> tuple[dict[str, str], bool]:
     return parsed, format_valid
 
 
+_RATIONALE_CUE_SPECS = {
+    "pitch": (("pitch",), ("higher", "lower")),
+    "energy": (("energy", "loudness"), ("higher", "lower")),
+    "rhythm": (("rhythm", "tempo"), ("faster", "slower")),
+    "duration": (("duration",), ("longer", "shorter")),
+}
+
+
+def parse_rationale_cues(text: str) -> dict[str, str]:
+    """Extract speaker-relative cue directions from free-form rationale text."""
+    lowered = re.sub(r"\s+", " ", text.lower()).strip()
+    parsed = {}
+
+    for cue_name, (aliases, directions) in _RATIONALE_CUE_SPECS.items():
+        cue_pattern = rf"(?:{'|'.join(map(re.escape, aliases))})"
+        direction_pattern = rf"(?:{'|'.join(map(re.escape, directions))})"
+
+        # Prefer an explicit directional comparison over a baseline phrase.
+        direction_match = re.search(
+            rf"(?:\b{direction_pattern}\b(?:\s+\w+){{0,3}}?\s+\b{cue_pattern}\b|"
+            rf"\b{cue_pattern}\b(?:\s+\w+){{0,3}}?\s+\b{direction_pattern}\b)",
+            lowered,
+        )
+        if direction_match:
+            direction = next(
+                value
+                for value in directions
+                if re.search(rf"\b{re.escape(value)}\b", direction_match.group(0))
+            )
+            parsed[cue_name] = direction
+            continue
+
+        baseline_patterns = (
+            rf"\b{cue_pattern}\b[^,.;:]{{0,50}}\bclose to "
+            rf"(?:this speaker's (?:neutral )?)?baseline\b",
+            rf"\b{cue_pattern}\b(?:\W+\w+){{0,3}}?\W+\bbaseline-like\b",
+            rf"\bbaseline-like\b(?:\W+\w+){{0,3}}?\W+\b{cue_pattern}\b",
+            rf"\bclose to (?:the )?baseline\b(?:\W+\w+){{0,3}}?\W+"
+            rf"\b{cue_pattern}\b",
+        )
+        parsed[cue_name] = (
+            "baseline-like"
+            if any(re.search(pattern, lowered) for pattern in baseline_patterns)
+            else ""
+        )
+
+    return parsed
+
+
 def parse_generated_label(
     text: str,
     prompt_type: str,
@@ -636,6 +686,7 @@ def write_generation_samples(config, sample_rows):
         ),
     )
     fieldnames = [
+        "sample_id",
         "prompt_type",
         "true_label",
         "parsed_prediction",
@@ -943,6 +994,8 @@ def evaluate(config):
     evidence_cue_mention_flags = []
     evidence_faithfulness_flags = []
     cue_format_valid_flags = []
+    think_extracted_flags = []
+    cue_mention_flags = {cue_name: [] for cue_name in CUE_NAMES}
     cue_correct_flags = {cue_name: [] for cue_name in CUE_NAMES}
     cue_exact_match_flags = []
 
@@ -967,6 +1020,12 @@ def evaluate(config):
 
     for local_batch_idx, batch in enumerate(loader):
         original_idx = test_idx[local_batch_idx]
+        real_idx = dataset.sample_indices[original_idx]
+        sample_id = ""
+        if dataset.all_file_paths is not None:
+            sample_id = os.path.splitext(
+                os.path.basename(str(dataset.all_file_paths[real_idx]))
+            )[0]
 
         prompt = prompt_overrides.get(
             original_idx,
@@ -1032,6 +1091,7 @@ def evaluate(config):
             generated_answers.append(generated_text)
             generated_full_texts.append(full_text)
             sample_rows.append({
+                "sample_id": sample_id,
                 "prompt_type": config["prompt_type"],
                 "true_label": true_label,
                 "parsed_prediction": "",
@@ -1077,7 +1137,50 @@ def evaluate(config):
         evidence_non_empty_flags.append(evidence_non_empty)
         evidence_cue_mention_flags.append(evidence_cue_mention)
         evidence_faithfulness_flags.append(evidence_faithfulness)
+
+        true_cues = {cue_name: "" for cue_name in CUE_NAMES}
+        pred_cues = {cue_name: "" for cue_name in CUE_NAMES}
+        cue_format_valid = ""
+        cue_exact_match = ""
+        if config["prompt_type"] == LABEL_BLIND_RATIONALE_PROMPT_TYPE:
+            annotation = dataset.cot_annotations.get(sample_id)
+            if annotation is None:
+                raise KeyError(f"Missing CoT annotation for sample: {sample_id}")
+            try:
+                reference_text = annotation["evidence"]["speaker_relative_prosody"]
+            except (KeyError, TypeError) as exc:
+                raise ValueError(
+                    f"Missing evidence.speaker_relative_prosody for {sample_id}"
+                ) from exc
+
+            true_cues = parse_rationale_cues(str(reference_text))
+            missing_reference_cues = [
+                cue_name for cue_name in CUE_NAMES if not true_cues[cue_name]
+            ]
+            if missing_reference_cues:
+                raise ValueError(
+                    f"Could not parse reference cues for {sample_id}: "
+                    f"{', '.join(missing_reference_cues)}"
+                )
+
+            pred_cues = parse_rationale_cues(think_text)
+            think_extracted_flags.append(bool(think_text))
+            cue_format_valid = all(pred_cues.values())
+            cue_format_valid_flags.append(cue_format_valid)
+            for cue_name in CUE_NAMES:
+                mentioned = bool(pred_cues[cue_name])
+                cue_mention_flags[cue_name].append(mentioned)
+                cue_correct_flags[cue_name].append(
+                    mentioned and pred_cues[cue_name] == true_cues[cue_name]
+                )
+            cue_exact_match = cue_format_valid and all(
+                pred_cues[cue_name] == true_cues[cue_name]
+                for cue_name in CUE_NAMES
+            )
+            cue_exact_match_flags.append(cue_exact_match)
+
         sample_rows.append({
+            "sample_id": sample_id,
             "prompt_type": config["prompt_type"],
             "true_label": true_label,
             "parsed_prediction": pred_label or "invalid",
@@ -1090,16 +1193,16 @@ def evaluate(config):
             "evidence_non_empty": evidence_non_empty,
             "evidence_cue_mention": evidence_cue_mention,
             "evidence_faithfulness_ok": evidence_faithfulness,
-            "true_pitch": "",
-            "pred_pitch": "",
-            "true_energy": "",
-            "pred_energy": "",
-            "true_rhythm": "",
-            "pred_rhythm": "",
-            "true_duration": "",
-            "pred_duration": "",
-            "cue_format_valid": "",
-            "cue_exact_match": "",
+            "true_pitch": true_cues["pitch"],
+            "pred_pitch": pred_cues["pitch"],
+            "true_energy": true_cues["energy"],
+            "pred_energy": pred_cues["energy"],
+            "true_rhythm": true_cues["rhythm"],
+            "pred_rhythm": pred_cues["rhythm"],
+            "true_duration": true_cues["duration"],
+            "pred_duration": pred_cues["duration"],
+            "cue_format_valid": cue_format_valid,
+            "cue_exact_match": cue_exact_match,
         })
 
     if config["prompt_type"] == ACOUSTIC_CUE_PROMPT_TYPE:
@@ -1154,6 +1257,40 @@ def evaluate(config):
     print("Free-generation results:")
     _print_classification_metrics(y_true, y_pred, label_names)
     print(f"  Format validity:          {format_validity:.4f}")
+
+    if config["prompt_type"] == LABEL_BLIND_RATIONALE_PROMPT_TYPE:
+        sample_count = max(len(think_extracted_flags), 1)
+        mention_rates = {
+            cue_name: sum(cue_mention_flags[cue_name]) / sample_count
+            for cue_name in CUE_NAMES
+        }
+        factual_accuracies = {}
+        for cue_name in CUE_NAMES:
+            mention_count = sum(cue_mention_flags[cue_name])
+            factual_accuracies[cue_name] = (
+                sum(cue_correct_flags[cue_name]) / mention_count
+                if mention_count else 0.0
+            )
+        total_mentions = sum(sum(flags) for flags in cue_mention_flags.values())
+        total_correct = sum(sum(flags) for flags in cue_correct_flags.values())
+        overall_factual_accuracy = (
+            total_correct / total_mentions if total_mentions else 0.0
+        )
+
+        print()
+        print("Rationale cue factuality:")
+        print(f"  Think extraction rate:    {sum(think_extracted_flags) / sample_count:.4f}")
+        for cue_name in CUE_NAMES:
+            print(f"  {cue_name.title()} mention rate:    {mention_rates[cue_name]:.4f}")
+            print(
+                f"  {cue_name.title()} factual accuracy: "
+                f"{factual_accuracies[cue_name]:.4f}"
+            )
+        print(f"  Overall cue factual accuracy: {overall_factual_accuracy:.4f}")
+        print(
+            "  Exact 4-cue match rate:       "
+            f"{sum(cue_exact_match_flags) / sample_count:.4f}"
+        )
 
     if config["generate_evidence"]:
         evidence_format_validity = sum(evidence_format_valid_flags) / max(
