@@ -32,6 +32,7 @@ GENERATION_PROMPT_TYPES = [
     "reasoning_generation_global",
     "speaker_reasoning_generation",
     "speaker_reasoning_generation_answer_first",
+    "speaker_label_blind_rationale_generation",
     "speaker_acoustic_cue_generation",
 ]
 
@@ -43,6 +44,7 @@ STRUCTURED_ANSWER_PROMPT_TYPES = {
     "reasoning_generation_global",
     "speaker_reasoning_generation",
     "speaker_reasoning_generation_answer_first",
+    "speaker_label_blind_rationale_generation",
 }
 
 
@@ -86,6 +88,8 @@ def _checkpoint_tag(
 def _max_length_for_prompt_type(prompt_type: str) -> int:
     if prompt_type == "speaker_acoustic_cue_generation":
         return 128
+    if prompt_type == "speaker_label_blind_rationale_generation":
+        return 384
     if "reasoning_generation" in prompt_type:
         return 224
     if "feature" in prompt_type:
@@ -110,6 +114,7 @@ def _build_config(
     speaker_baseline_mode: str = "neutral",
     baseline_estimation_mode: str = "speaker_neutral",
     disable_input_cue_text: bool = False,
+    cot_annotations_path: str | None = None,
 ) -> dict:
     dataset_config = get_dataset_config(dataset)
     tag = _checkpoint_tag(
@@ -147,6 +152,7 @@ def _build_config(
         "speaker_baseline_mode": speaker_baseline_mode,
         "baseline_estimation_mode": baseline_estimation_mode,
         "disable_input_cue_text": disable_input_cue_text,
+        "cot_annotations_path": cot_annotations_path,
         "embeddings_path": (
             f"embeddings/{dataset_config['embeddings_prefix']}"
             f"{encoder}_embeddings.pt"
@@ -208,6 +214,7 @@ def train(config):
         evidence_loss_weight=config["evidence_loss_weight"],
         speaker_baseline_mode=config["speaker_baseline_mode"],
         disable_input_cue_text=config["disable_input_cue_text"],
+        cot_annotations_path=config["cot_annotations_path"],
     )
 
     if (
@@ -334,6 +341,8 @@ def train(config):
     print(f"  Speaker baseline mode: {config['speaker_baseline_mode']}")
     print(f"  Baseline estimation mode: {config['baseline_estimation_mode']}")
     print(f"  Disable input cue text: {config['disable_input_cue_text']}")
+    if config["cot_annotations_path"]:
+        print(f"  CoT annotations: {config['cot_annotations_path']}")
     print(f"  LoRA rank:    {config['lora_rank']}")
     if config["prompt_type"] == "speaker_feature_answer_evidence_generation":
         print(f"  Answer weight:{config['answer_loss_weight']}")
@@ -726,6 +735,12 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        "--cot_annotations_path",
+        default=None,
+        help="JSONL annotations for speaker_label_blind_rationale_generation.",
+    )
+
+    parser.add_argument(
         "--speaker_baseline_mode",
         choices=["neutral", "emotion_balanced"],
         default="neutral",
@@ -768,6 +783,7 @@ if __name__ == "__main__":
         speaker_baseline_mode=args.speaker_baseline_mode,
         baseline_estimation_mode=args.baseline_estimation_mode,
         disable_input_cue_text=args.disable_input_cue_text,
+        cot_annotations_path=args.cot_annotations_path,
     )
 
     smoke_test(config)

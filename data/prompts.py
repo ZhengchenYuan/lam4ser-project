@@ -95,6 +95,10 @@ PROMPTS = {
         "Describe the emotional speech and predict the emotion."
     ),
 
+    "speaker_label_blind_rationale_generation": (
+        "Analyze the emotional speech step by step and predict the emotion."
+    ),
+
     "speaker_acoustic_cue_generation": (
         "Predict the speaker-relative acoustic cue categories for this speech."
     ),
