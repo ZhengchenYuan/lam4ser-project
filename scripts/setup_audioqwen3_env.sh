@@ -23,7 +23,7 @@ fi
 "$BOOTSTRAP_PYTHON" -m venv "$AUDIOQWEN3_ENV"
 PYTHON="$AUDIOQWEN3_ENV/bin/python"
 
-"$PYTHON" -m pip install --upgrade pip setuptools wheel
+"$PYTHON" -m pip install --upgrade pip "setuptools<82" wheel
 "$PYTHON" -m pip install torch torchvision torchaudio --index-url "$TORCH_INDEX_URL"
 "$PYTHON" -m pip install \
   "transformers>=5.2.0" \

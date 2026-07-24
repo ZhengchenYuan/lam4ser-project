@@ -11,6 +11,7 @@ set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$PWD}"
 
 export LD_LIBRARY_PATH=/data/chi-gpu4/eihwadmin/.cache/rattler/cache/pkgs/libstdcxx-15.1.0-h8f9b012_5/lib:/run/opengl-driver/lib:${LD_LIBRARY_PATH:-}
+export PATH=/data/chi-gpu4/ge94xov/audioqwen3-env/bin:${PATH}
 PYTHON=/data/chi-gpu4/ge94xov/audioqwen3-env/bin/python
 
 "$PYTHON" scripts/generate_audioqwen3_teacher_rationales.py \
