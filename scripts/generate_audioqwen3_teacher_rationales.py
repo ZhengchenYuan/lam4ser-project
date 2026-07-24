@@ -215,6 +215,7 @@ def check_dependencies() -> bool:
     )
 
     print(f"Python executable: {sys.executable}")
+    print(f"LD_LIBRARY_PATH: {os.environ.get('LD_LIBRARY_PATH', '(unset)')}")
     print("AudioQwen3 dependency check:")
     for name, available, detail in checks:
         status = "OK" if available else "MISSING"
@@ -222,10 +223,19 @@ def check_dependencies() -> bool:
 
     ready = all(available for _, available, _ in checks)
     if not ready:
+        missing_details = " ".join(detail for _, available, detail in checks if not available)
+        library_hint = ""
+        if "libstdc++.so.6" in missing_details:
+            library_hint = (
+                "\nThe cluster libstdc++ runtime is not visible. Run the updated "
+                "setup script or export the LD_LIBRARY_PATH used by the pilot "
+                "Slurm script before checking manually."
+            )
         print(
             "\nThis environment does not support Qwen3-Omni. "
             "Use /data/chi-gpu4/ge94xov/audioqwen3-env/bin/python after running "
             "scripts/setup_audioqwen3_env.sh. Do not upgrade lam4ser-env."
+            f"{library_hint}"
         )
     return ready
 
