@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
 import os
+import shutil
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
@@ -13,9 +15,6 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from data.dataset import extract_speaker_id, speaker_independent_split
-from data.dataset_configs import get_dataset_config
 
 
 DEFAULT_MODEL_ID = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
@@ -48,6 +47,8 @@ class _SplitDataset:
     """Small adapter for the repository's shared speaker split function."""
 
     def __init__(self, samples: list[tuple[str, str]]):
+        from data.dataset import extract_speaker_id
+
         self.speaker_ids = [extract_speaker_id(path) for path, _ in samples]
 
     def __len__(self) -> int:
@@ -92,6 +93,8 @@ def _without_neutral_enrollment(
     samples: list[tuple[str, str]],
 ) -> list[tuple[str, str]]:
     """Match the neutral enrollment exclusion used by rationale generation."""
+    from data.dataset import extract_speaker_id
+
     by_speaker_label: dict[tuple[str, str], list[int]] = defaultdict(list)
     for index, (audio_path, answer) in enumerate(samples):
         by_speaker_label[(extract_speaker_id(audio_path), answer)].append(index)
@@ -118,6 +121,9 @@ def _without_neutral_enrollment(
 
 def load_aibo_samples() -> list[AIBOSample]:
     """Build sample IDs, answers, and splits compatible with generation data."""
+    from data.dataset import speaker_independent_split
+    from data.dataset_configs import get_dataset_config
+
     indexed_samples = _without_neutral_enrollment(_load_aibo_index())
     config = get_dataset_config("aibo")
     train_indices, val_indices, test_indices = speaker_independent_split(
@@ -151,6 +157,79 @@ def _resolve_dtype(dtype_name: str, torch_module: Any) -> Any:
     }[dtype_name]
 
 
+def check_dependencies() -> bool:
+    """Print a lightweight Qwen3-Omni environment readiness report."""
+    checks: list[tuple[str, bool, str]] = []
+
+    try:
+        import torch
+
+        checks.append(("torch", True, torch.__version__))
+    except Exception as exc:
+        checks.append(("torch", False, f"{type(exc).__name__}: {exc}"))
+
+    try:
+        transformers_version = importlib.metadata.version("transformers")
+    except importlib.metadata.PackageNotFoundError:
+        transformers_version = "not installed"
+    checks.append(
+        ("transformers", transformers_version != "not installed", transformers_version)
+    )
+
+    try:
+        from transformers import Qwen3OmniMoeForConditionalGeneration  # noqa: F401
+
+        checks.append(("Qwen3OmniMoeForConditionalGeneration", True, "importable"))
+    except Exception as exc:
+        checks.append(
+            (
+                "Qwen3OmniMoeForConditionalGeneration",
+                False,
+                f"{type(exc).__name__}: {exc}",
+            )
+        )
+
+    try:
+        from transformers import Qwen3OmniMoeProcessor  # noqa: F401
+
+        checks.append(("Qwen3OmniMoeProcessor", True, "importable"))
+    except Exception as exc:
+        checks.append(
+            ("Qwen3OmniMoeProcessor", False, f"{type(exc).__name__}: {exc}")
+        )
+
+    try:
+        import qwen_omni_utils  # noqa: F401
+
+        try:
+            qwen_utils_version = importlib.metadata.version("qwen-omni-utils")
+        except importlib.metadata.PackageNotFoundError:
+            qwen_utils_version = "importable (version unknown)"
+        checks.append(("qwen_omni_utils", True, qwen_utils_version))
+    except Exception as exc:
+        checks.append(("qwen_omni_utils", False, f"{type(exc).__name__}: {exc}"))
+
+    ffmpeg_path = shutil.which("ffmpeg")
+    checks.append(
+        ("ffmpeg", ffmpeg_path is not None, ffmpeg_path or "not found on PATH")
+    )
+
+    print(f"Python executable: {sys.executable}")
+    print("AudioQwen3 dependency check:")
+    for name, available, detail in checks:
+        status = "OK" if available else "MISSING"
+        print(f"  [{status}] {name}: {detail}")
+
+    ready = all(available for _, available, _ in checks)
+    if not ready:
+        print(
+            "\nThis environment does not support Qwen3-Omni. "
+            "Use /data/chi-gpu4/ge94xov/audioqwen3-env/bin/python after running "
+            "scripts/setup_audioqwen3_env.sh. Do not upgrade lam4ser-env."
+        )
+    return ready
+
+
 def load_audioqwen3_model(
     model_id: str,
     device: str,
@@ -160,14 +239,29 @@ def load_audioqwen3_model(
     """Load Qwen3-Omni using the official Transformers text-output path."""
     try:
         import torch
+    except ImportError as exc:
+        raise RuntimeError(
+            "PyTorch is unavailable. Use the separate AudioQwen3 environment at "
+            "/data/chi-gpu4/ge94xov/audioqwen3-env; do not modify lam4ser-env."
+        ) from exc
+
+    try:
         from transformers import (
             Qwen3OmniMoeForConditionalGeneration,
             Qwen3OmniMoeProcessor,
         )
     except ImportError as exc:
+        try:
+            transformers_version = importlib.metadata.version("transformers")
+        except importlib.metadata.PackageNotFoundError:
+            transformers_version = "not installed"
         raise RuntimeError(
-            "Qwen3-Omni requires transformers>=5.2.0, accelerate, torch, "
-            "qwen-omni-utils, and ffmpeg."
+            "The current environment does not support Qwen3-Omni: "
+            "Qwen3OmniMoeForConditionalGeneration and/or Qwen3OmniMoeProcessor "
+            f"cannot be imported from transformers {transformers_version}. "
+            "Run scripts/setup_audioqwen3_env.sh and use "
+            "/data/chi-gpu4/ge94xov/audioqwen3-env/bin/python. "
+            "Do not upgrade lam4ser-env."
         ) from exc
 
     if device.startswith("cuda") and not torch.cuda.is_available():
@@ -329,6 +423,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_new_tokens", type=int, default=256)
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--top_p", type=float, default=0.9)
+    parser.add_argument(
+        "--check_dependencies",
+        action="store_true",
+        help="Print dependency versions/import availability and exit.",
+    )
     args = parser.parse_args()
 
     if args.max_samples is not None and args.max_samples < 1:
@@ -344,6 +443,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.check_dependencies:
+        raise SystemExit(0 if check_dependencies() else 1)
+
     split_name = "validation" if args.split == "val" else args.split
     samples = load_aibo_samples()
     if split_name != "all":

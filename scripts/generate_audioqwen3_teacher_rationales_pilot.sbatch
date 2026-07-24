@@ -10,8 +10,11 @@
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$PWD}"
 
-export LD_LIBRARY_PATH="/data/chi-gpu4/eihwadmin/cuda/lib64:${LD_LIBRARY_PATH:-}"
-PYTHON=/data/chi-gpu4/ge94xov/lam4ser-env/bin/python
+export LD_LIBRARY_PATH=/data/chi-gpu4/eihwadmin/.cache/rattler/cache/pkgs/libstdcxx-15.1.0-h8f9b012_5/lib:/run/opengl-driver/lib:${LD_LIBRARY_PATH:-}
+PYTHON=/data/chi-gpu4/ge94xov/audioqwen3-env/bin/python
+
+"$PYTHON" scripts/generate_audioqwen3_teacher_rationales.py \
+  --check_dependencies
 
 "$PYTHON" scripts/generate_audioqwen3_teacher_rationales.py \
   --dataset aibo \
